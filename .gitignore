@@ -1,0 +1,35 @@
+# Gradle
+.gradle/
+build/
+app/build/
+app/.cxx/
+build/jre/
+rel.json
+cs.json
+
+# ZCode
+.zcode/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# Android
+local.properties
+*.apk
+*.aab
+*.keystore
+!debug.keystore
+keystore/
+keystore.properties
+
+# JRE artifacts (downloaded/repacked by Gradle task)
+app/src/main/assets/jre/
+app/src/main/jniLibs/
+app/src/debug/assets/jre/
+app/src/debug/jniLibs/
+
+# OS
+.DS_Store
+Thumbs.db

@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">MC服务器</string>
+    <string name="notification_channel_running">服务器运行中</string>
+    <string name="notification_title_running">MC 服务器运行中</string>
+</resources>

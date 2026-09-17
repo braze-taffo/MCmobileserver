@@ -26,6 +26,7 @@ object LaunchSpecBuilder {
     }
 
     private fun buildOrThrow(instance: ServerInstance, dir: File, javaHome: File): LaunchSpec {
+        var argfileJvmOpts: List<String> = emptyList()
         val (classpath, mainClass, args) = when (instance.type) {
             ServerType.VANILLA, ServerType.PAPER, ServerType.FABRIC -> {
                 val jar = findCoreJar(dir)
@@ -36,6 +37,10 @@ object LaunchSpecBuilder {
             }
             ServerType.FORGE, ServerType.NEOFORGE -> {
                 val parsed = LaunchArgfiles.parse(dir)
+                // NeoForge 1.21 的 -p（模块路径）jar 已并入 classpathEntries，
+                // 但模块路径、--add-opens/--add-exports、-DlegacyClassPath 等
+                // 必须原样传给 VM，否则 BootstrapLauncher 起不来。
+                argfileJvmOpts = parsed.unixJvmArgs + parsed.userJvmArgs
                 // JVM 在 Android/Linux 上，classpath 分隔符固定为 ':'
                 val cp = parsed.classpathEntries.joinToString(":") {
                     File(dir, it).absolutePath
@@ -46,11 +51,9 @@ object LaunchSpecBuilder {
             }
         }
 
-        // 顺序：用户 user_jvm_args → 实例自定义 → 堆参数（后者覆盖前者）
+        // 顺序：unix_args → user_jvm_args → 实例自定义 → 堆参数（后者覆盖前者）
         val jvmOpts = buildList {
-            if (instance.type == ServerType.FORGE || instance.type == ServerType.NEOFORGE) {
-                addAll(LaunchArgfiles.parseUserJvmArgs(File(dir, "user_jvm_args.txt")))
-            }
+            addAll(argfileJvmOpts)
             addAll(instance.extraJvmArgs)
             add("-Xms${instance.minHeapMb}M")
             add("-Xmx${instance.maxHeapMb}M")

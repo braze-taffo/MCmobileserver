@@ -98,7 +98,9 @@ android {
     }
     packaging {
         jniLibs {
-            useLegacyPackaging = false
+            // frpc is an executable packaged as a native library; it must be extracted.
+            useLegacyPackaging = true
+            keepDebugSymbols += "**/libfrpc.so"
             // mobile 构建已做过符号剥离；AGP 再 strip 会损坏 libjvm.so
             keepDebugSymbols += "**/libjvm.so"
         }
@@ -151,6 +153,19 @@ fun sha256Of(file: File): String {
     return md.digest().joinToString("") { "%02x".format(it) }
 }
 
+/** JRE25 的 libjvm 依赖 libc++_shared.so（NDK 惯例由宿主 App 提供） */
+fun ndkLibcxx(abi: String, triple: String): File {
+    val ndkDir = File(android.sdkDirectory, "ndk/${android.ndkVersion}")
+    val host = listOf(
+        "windows-x86_64", "linux-x86_64", "darwin-x86_64", "darwin-arm64",
+    ).first { File(ndkDir, "toolchains/llvm/prebuilt/$it").exists() }
+    val lib = File(
+        ndkDir, "toolchains/llvm/prebuilt/$host/sysroot/usr/lib/$triple/libc++_shared.so",
+    )
+    check(lib.exists()) { "libc++_shared.so not found in NDK for $triple" }
+    return lib
+}
+
 fun downloadTo(url: String, target: File) {
     val tmp = File(target.parentFile, target.name + ".part")
     URI(url).toURL().openStream().use { input ->
@@ -193,19 +208,23 @@ val prepareJreAssets by tasks.registering {
                 val marker = File(cacheDir, "$abi-${spec.major}.marker")
 
                 val isMain = abi == "arm64-v8a"
-                val libjvmDst = File(
+                val jniDir = File(
                     projectDir,
-                    if (isMain) "src/main/jniLibs/$abi/libjvm${spec.major}.so"
-                    else "src/debug/jniLibs/$abi/libjvm${spec.major}.so",
+                    if (isMain) "src/main/jniLibs/$abi" else "src/debug/jniLibs/$abi",
                 )
+                val libjvmDst = File(jniDir, "libjvm${spec.major}.so")
                 val assetsDir = File(
                     projectDir,
                     if (isMain) "src/main/assets/jre/$abi" else "src/debug/assets/jre/$abi",
                 )
                 val zipDst = File(assetsDir, "${spec.major}.zip")
+                // JRE25 需要 libc++_shared.so
+                val triple = if (abi == "arm64-v8a") "aarch64-linux-android" else "x86_64-linux-android"
+                val libcxxDst = if (spec.major == 25) File(jniDir, "libc++_shared.so") else null
 
                 val upToDate = marker.exists() && marker.readText().trim() == spec.sha256 &&
-                        libjvmDst.exists() && zipDst.exists()
+                        libjvmDst.exists() && zipDst.exists() &&
+                        (libcxxDst == null || libcxxDst.exists())
                 if (upToDate) continue
 
                 val tarFile = File(cacheDir, "$abi-${spec.major}.tar.xz")
@@ -226,6 +245,7 @@ val prepareJreAssets by tasks.registering {
                 check(libjvm.exists()) { "libjvm.so missing in $abi java${spec.major} archive" }
                 libjvmDst.parentFile.mkdirs()
                 libjvm.copyTo(libjvmDst, overwrite = true)
+                libcxxDst?.let { ndkLibcxx(abi, triple).copyTo(it, overwrite = true) }
 
                 assetsDir.mkdirs()
                 ZipOutputStream(zipDst.outputStream().buffered(1 shl 16)).use { zos ->
@@ -254,6 +274,34 @@ val prepareJreAssets by tasks.registering {
 }
 
 tasks.named("preBuild") { dependsOn(prepareJreAssets) }
+
+// Official Android executable, pinned and verified before packaging.
+val prepareFrpc by tasks.registering {
+    val version = "0.71.0"
+    val digest = "845b486c63686990e671f13cc5e3bd130ce7be659ab3c6f043008353451858cb"
+    val destination = file("src/main/jniLibs/arm64-v8a/libfrpc.so")
+    val license = file("src/main/assets/frp/LICENSE")
+    inputs.property("sha256", digest)
+    outputs.files(destination, license)
+    doLast {
+        val cache = rootProject.layout.buildDirectory.dir("frp").get().asFile.apply { mkdirs() }
+        val archive = File(cache, "frp_${version}_android_arm64.tar.gz")
+        if (!archive.exists() || sha256Of(archive) != digest) {
+            downloadTo("https://github.com/fatedier/frp/releases/download/v$version/${archive.name}", archive)
+        }
+        check(sha256Of(archive) == digest) { "FRP SHA-256 mismatch" }
+        val process = ProcessBuilder("tar", "-xzf", archive.absolutePath, "-C", cache.absolutePath)
+            .redirectErrorStream(true).start()
+        val output = process.inputStream.bufferedReader().readText()
+        check(process.waitFor() == 0) { "FRP extraction failed: $output" }
+        val extracted = File(cache, "frp_${version}_android_arm64")
+        destination.parentFile.mkdirs()
+        File(extracted, "frpc").copyTo(destination, overwrite = true)
+        license.parentFile.mkdirs()
+        File(extracted, "LICENSE").copyTo(license, overwrite = true)
+    }
+}
+tasks.named("preBuild") { dependsOn(prepareFrpc) }
 
 tasks.withType<Test>().configureEach {
     testLogging { events("failed"); showStackTraces = true }

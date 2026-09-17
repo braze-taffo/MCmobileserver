@@ -16,19 +16,23 @@ object JvmLauncher {
      * 启动 JVM 并运行 [mainClass] 的 main(String[])。
      * 立即返回；结束事件通过 [JvmLauncherCallback.onJvmExited] 回调。
      *
-     * @param libjvmPath nativeLibraryDir 下的 libjvm.so 绝对路径
+     * @param libjvmPath libjvm 的 APK 内嵌路径（含 `!/lib/<abi>/` 形式）
      * @param javaHome 解压后的 JRE 根目录（含 lib/modules）
      * @param mainClass 完整类名，如 "net.minecraft.bundler.Main"
+     * @param initLogPath JVM 初始化期的 stdout/stderr 落盘文件；空串表示不落盘
      * @param jvmOpts JVM 选项，需包含 -Djava.home、-Djava.class.path、-Xmx 等
      * @param args 传给 main 的程序参数
+     * @param waitForThreads main 返回后是否等非守护线程结束才回调退出（服务器 true，安装器等一次性工具 false）
      * @return 0 表示线程创建成功；负数表示启动失败
      */
     external fun nativeStart(
         libjvmPath: String,
         javaHome: String,
         mainClass: String,
+        initLogPath: String,
         jvmOpts: Array<String>,
         args: Array<String>,
+        waitForThreads: Boolean,
     ): Int
 
     /** 切换进程工作目录（android.system.Os 未暴露 chdir）。0 成功。 */

@@ -133,6 +133,11 @@ class ServerController(private val context: Context, private val repo: InstanceR
     suspend fun start(instance: ServerInstance): StartResult {
         val dir = repo.instanceDir(instance)
         if (instance.needsInstaller && !instance.installed) {
+            // 安装产物（unix_args.txt）可能已经在了，只是上次没来得及回写 installed
+            // （安装器跑完进程被强制结束、App 被杀等）。这种情况直接自愈，别白白再装一遍。
+            if (verifyInstalled(instance)) {
+                return start(instance.copy(installed = true))
+            }
             // 需要（重新）跑安装器：下载好了 installer.jar 才会走到这里
             val installer = File(dir, "installer.jar")
             if (!installer.exists()) return StartResult.Error("缺少 installer.jar，请先重建/下载核心")
@@ -166,6 +171,10 @@ class ServerController(private val context: Context, private val repo: InstanceR
             jvmOpts = listOf("-Xms128M", "-Xmx768M"),
             args = listOf("--installServer"),
             javaMajor = instance.javaMajor,
+            // 安装器是"跑完即止"的工具类：main 返回就代表装完了。
+            // 它跑完会残留一个停住的非守护线程，若等 DestroyJavaVM 会永远等下去，
+            // 进程不退、UI 一直卡在"安装中"。
+            waitForNonDaemonThreads = false,
         )
         ServerForegroundService.start(context, spec)
         return StartResult.Started

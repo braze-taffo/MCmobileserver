@@ -29,6 +29,8 @@ app/src/main/assets/jre/
 app/src/main/jniLibs/
 app/src/debug/assets/jre/
 app/src/debug/jniLibs/
+app/src/main/assets/frp/
+build-frp.log
 
 # OS
 .DS_Store

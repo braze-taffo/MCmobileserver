@@ -32,6 +32,9 @@ class ConsoleBridgeServer(
     private val logWriter: FileOutputStream? = logFile?.let { runCatching { FileOutputStream(it, true) }.getOrNull() }
     @Volatile private var closed = false
 
+    /** 最近一次广播的状态；新客户端连上时要补发，否则它会一直不知道服务器已在运行 */
+    private var lastState: String? = null
+
     fun start() {
         Thread({ acceptLoop() }, "mcs-console-accept").start()
     }
@@ -40,12 +43,17 @@ class ConsoleBridgeServer(
         while (!closed) {
             val socket = try { server.accept() } catch (_: Exception) { break }
             synchronized(lock) {
-                clients.add(socket)
-                // 新连接：先回放历史
+                // 新连接：先回放历史日志，再补发当前状态。
+                // 补状态是必须的：服务端广播 STARTING/RUNNING 时 UI 往往还没连上来，
+                // 少了这一步 UI 的 serverStatus 会一直是 null，控制台的输入框和
+                // 停止/强制结束按钮都会因为 running=false 而保持禁用。
+                // 先写完再入列，避免并发 appendLine 抢在回放前面造成乱序。
                 runCatching {
                     val os = socket.outputStream
                     for (line in history) os.write(frame(TYPE_LOG, line))
+                    lastState?.let { os.write(frame(TYPE_STATE, it)) }
                 }
+                clients.add(socket)
             }
             Thread({ readLoop(socket) }, "mcs-console-client").start()
         }
@@ -83,7 +91,10 @@ class ConsoleBridgeServer(
 
     fun broadcastState(json: String) {
         val bytes = frame(TYPE_STATE, json)
-        synchronized(lock) { for (c in clients) runCatching { c.outputStream.write(bytes) } }
+        synchronized(lock) {
+            lastState = json
+            for (c in clients) runCatching { c.outputStream.write(bytes) }
+        }
     }
 
     fun close() {

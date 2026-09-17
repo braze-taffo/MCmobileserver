@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <application>
+        <!-- 仅 debug：adb 驱动测试用 -->
+        <receiver
+            android:name=".debug.DebugStartReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.mcmobile.server.DEBUG_START" />
+            </intent-filter>
+        </receiver>
+    </application>
+</manifest>

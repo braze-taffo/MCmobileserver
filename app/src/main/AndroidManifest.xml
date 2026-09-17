@@ -17,6 +17,7 @@
         <activity
             android:name=".MainActivity"
             android:exported="true"
+            android:launchMode="singleTop"
             android:configChanges="orientation|screenSize|keyboardHidden|uiMode">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
@@ -25,6 +26,14 @@
         </activity>
 
         <!-- JVM 在独立进程中运行，崩溃与 UI 进程互相隔离 -->
+        <service
+            android:name=".service.FrpService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Maintains a user-started FRP TCP tunnel for a Minecraft server" />
+        </service>
         <service
             android:name=".service.ServerForegroundService"
             android:process=":server"
@@ -35,4 +44,5 @@
                 android:value="Runs an embedded Java (Minecraft) server inside the app" />
         </service>
     </application>
+
 </manifest>

@@ -19,6 +19,7 @@ object Routes {
     const val CREATE = "create"
     const val CONSOLE = "console"
     const val SETTINGS = "settings"
+    const val FRP = "frp"
     const val PROPERTIES = "properties/{id}"
     const val FILES = "files/{id}"
 
@@ -50,6 +51,7 @@ fun MCServerApp(vm: AppViewModel = viewModel()) {
         composable(Routes.CREATE) { CreateScreen(vm, nav) }
         composable(Routes.CONSOLE) { ConsoleScreen(vm, nav) }
         composable(Routes.SETTINGS) { SettingsScreen(vm, nav) }
+        composable(Routes.FRP) { com.mcmobile.server.ui.frp.FrpScreen(nav) }
         composable(Routes.PROPERTIES) { entry ->
             val id = entry.arguments?.getString("id")
             val inst = id?.let { vm.instanceById(it) }

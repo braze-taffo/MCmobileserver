@@ -12,6 +12,7 @@ import android.os.Build
 import android.os.IBinder
 import android.system.Os
 import com.mcmobile.server.R
+import com.mcmobile.server.core.console.Ansi
 import com.mcmobile.server.core.console.ConsoleBridgeServer
 import com.mcmobile.server.core.jre.JreManager
 import com.mcmobile.server.core.jre.JreStatus
@@ -181,7 +182,7 @@ class ServerForegroundService : Service() {
             logPump = scope.launch(Dispatchers.IO) {
                 try {
                     BufferedReader(InputStreamReader(FileInputStream(outR), Charsets.UTF_8)).useLines { seq ->
-                        for (line in seq) bridge?.appendLine(line)
+                        for (line in seq) bridge?.appendLine(Ansi.strip(line))
                     }
                 } catch (_: Exception) {
                 }
@@ -191,14 +192,36 @@ class ServerForegroundService : Service() {
                 scope.launch { onJvmExited(code, hadException) }
             }
 
-            val libjvm = s.libjvmPath
-                ?: File(applicationInfo.nativeLibraryDir, "libjvm${s.javaMajor}.so").absolutePath
+            // HotSpot 用 libjvm.so 的加载路径反推 java.home（-Djava.home 会被覆盖），
+            // 因此必须从 <javaHome>/lib/server/libjvm.so 加载；
+            // 该文件由 JreManager 从 APK 的 jniLibs 落盘而来（useLegacyPackaging=false 时
+            // 那些 .so 在磁盘上没有解压副本，只能用 APK 内嵌路径读出来再写到磁盘）。
+            val libjvm = s.libjvmPath?.takeIf { File(it).isFile }
+                ?: JreManager.materializeLibjvm(this@ServerForegroundService, s.javaMajor).absolutePath
+            // sun.boot.library.path 由 VM 自行推导，而这个 JRE 里的 libjvm 在 APK 内，
+            // 推导结果不可靠，直接把 JRE 的库目录显式告知 VM 与 System.loadLibrary
+            val jreLibDir = File(s.javaHome, "lib").absolutePath
             val opts = buildList {
                 add("-Djava.home=${s.javaHome}")
                 add("-Djava.class.path=${s.classpath}")
+                add("-Dsun.boot.library.path=$jreLibDir")
+                add("-Djava.library.path=$jreLibDir")
                 add("-Djava.io.tmpdir=${cacheDir.absolutePath}")
                 add("-Duser.home=${s.workDir}")
                 add("-Duser.dir=${s.workDir}")
+                // JVM 自己读不到 Android 的时区，不传就是 UTC（服务器日志/聊天时间会整体偏移）
+                add("-Duser.timezone=${java.util.TimeZone.getDefault().id}")
+                // Java 18+ 的 stdout/stderr 默认跟随平台编码，Android 上会退化到 ASCII，
+                // 中文/非 ASCII 日志会变成 '?'，显式钉住 UTF-8
+                add("-Dfile.encoding=UTF-8")
+                add("-Dstdout.encoding=UTF-8")
+                add("-Dstderr.encoding=UTF-8")
+                add("-Djava.awt.headless=true")
+                add("-Dlog4j2.formatMsgNoLookups=true")
+                if (applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE != 0) {
+                    // init 阶段日志随 fd1 一起落到 logs/jvm-init.log，便于定位 VM 初始化失败
+                    add("-Xlog:init,os=info")
+                }
                 addAll(s.jvmOpts)
             }
 
@@ -207,12 +230,19 @@ class ServerForegroundService : Service() {
                 libjvmPath = libjvm,
                 javaHome = s.javaHome,
                 mainClass = s.mainClass,
+                initLogPath = File(logsDir, "jvm-init.log").absolutePath,
                 jvmOpts = opts.toTypedArray(),
                 args = s.args.toTypedArray(),
+                waitForThreads = s.waitForNonDaemonThreads,
             )
             if (rc != 0) throw IllegalStateException("JVM 启动失败（rc=$rc）")
         } catch (t: Throwable) {
             b.appendLine("[MC服务器] 启动错误: ${t.message}")
+            val initLog = File(logsDir, "jvm-init.log")
+            if (initLog.isFile()) {
+                runCatching { initLog.readLines().drop(1) }
+                    .getOrNull()?.filter { it.isNotBlank() }?.forEach { b.appendLine(it) }
+            }
             setStatus(RunStatus.FAILED, error = t.message)
             delay(1500)
             shutdownNow(1)
@@ -223,7 +253,7 @@ class ServerForegroundService : Service() {
     private suspend fun onJvmExited(code: Int, hadException: Boolean) {
         setStatus(if (hadException || code != 0) RunStatus.CRASHED else RunStatus.STOPPED, exit = code)
         bridge?.appendLine("[MC服务器] JVM 已退出（code=$code exception=$hadException）")
-        delay(600)
+        delay(2000)
         shutdownNow(code)
     }
 

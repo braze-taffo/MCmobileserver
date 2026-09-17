@@ -102,6 +102,9 @@ fun HomeScreen(vm: AppViewModel, nav: NavController) {
                         fontWeight = FontWeight.Bold,
                     )
                     Spacer(Modifier.weight(1f))
+                    TextButton(onClick = { nav.navigate(Routes.FRP) }) {
+                        Text("内网穿透", color = MaterialTheme.colorScheme.onPrimary)
+                    }
                     IconButton(onClick = { nav.navigate(Routes.SETTINGS) }) {
                         Icon(Icons.Default.Settings, "设置",
                             tint = MaterialTheme.colorScheme.onPrimary)

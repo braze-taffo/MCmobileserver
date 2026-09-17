@@ -10,7 +10,6 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.withContext
 import java.io.File
-import java.util.zip.ZipInputStream
 
 enum class JreStatus { NOT_READY, EXTRACTING, READY, FAILED }
 
@@ -36,7 +35,16 @@ object JreManager {
     /** 应用打包的 Java 大版本 */
     val AVAILABLE_MAJORS = listOf(21, 25)
 
-    private const val ZIP_ENTRY_COUNT_GUESS = 280
+    /**
+     * libjvm 在 javaHome 里的标准位置。
+     *
+     * HotSpot 不认 `-Djava.home=`：`os::init_2()` 会用 dladdr 取 libjvm.so 的实际加载路径，
+     * 去掉 /libjvm.so、/{server|client}、/lib 三级后**无条件覆盖** java.home，紧接着检查
+     * `<java.home>/lib/modules`，不存在就 `Failed setting boot class path.` 直接 exit(1)。
+     * 所以 libjvm 必须从磁盘上的这个位置 dlopen —— 直接用 APK 内嵌路径（...base.apk!/lib/...）
+     * 反推出来的 java.home 是 `.../base.apk!`，必然失败。
+     */
+    const val LIBJVM_REL = "lib/server/libjvm.so"
 
     private val _state = MutableStateFlow(JreState())
     val state: StateFlow<JreState> = _state.asStateFlow()
@@ -53,9 +61,34 @@ object JreManager {
     fun javaHomeDir(context: Context, javaMajor: Int = 21): File =
         File(context.filesDir, "jre/${supportedAbi() ?: "unknown"}/$javaMajor")
 
+    fun libjvmFile(context: Context, javaMajor: Int = 21): File =
+        File(javaHomeDir(context, javaMajor), LIBJVM_REL)
+
     fun isReady(context: Context, javaMajor: Int = 21): Boolean {
         val home = javaHomeDir(context, javaMajor)
-        return File(home, "lib/modules").exists() && File(home, ".mcs-extracted").exists()
+        return File(home, "lib/modules").exists() && File(home, ".mcs-extracted").exists() &&
+            libjvmFile(context, javaMajor).exists()
+    }
+
+    /**
+     * 把 APK 里的 `lib/<abi>/libjvm<major>.so` 落一份到 `<javaHome>/lib/server/libjvm.so`。
+     * 原生库仍然由 APK 提供（jniLibs 打包），这里只是让它出现在 HotSpot 期望的位置。
+     */
+    fun materializeLibjvm(context: Context, javaMajor: Int = 21): File {
+        val dest = libjvmFile(context, javaMajor)
+        if (dest.exists() && dest.length() > 0) return dest
+        val abi = supportedAbi() ?: throw IllegalStateException("不支持的设备架构")
+        val entryName = "lib/$abi/libjvm$javaMajor.so"
+        dest.parentFile?.mkdirs()
+        java.util.zip.ZipFile(File(context.applicationInfo.sourceDir)).use { zf ->
+            val entry = zf.getEntry(entryName)
+                ?: throw IllegalStateException("APK 内缺少原生库 $entryName")
+            zf.getInputStream(entry).use { input ->
+                dest.outputStream().use { input.copyTo(it) }
+            }
+        }
+        setPerms(dest, executable = true)
+        return dest
     }
 
     /** 幂等：已解压则直接返回；否则后台解压并更新 [state]。 */
@@ -67,12 +100,19 @@ object JreManager {
             return@withContext
         }
         val home = javaHomeDir(appContext, javaMajor)
-        if (isReady(appContext, javaMajor)) {
-            _state.update {
-                it.copy(
-                    status = JreStatus.READY, abi = abi, javaHome = home, javaMajor = javaMajor,
-                    javaVersion = readJavaVersion(home), progress = 1f, error = null,
-                )
+        val extracted = File(home, "lib/modules").exists() && File(home, ".mcs-extracted").exists()
+        if (extracted) {
+            // 已解压过：只补齐可能缺失的 libjvm（老安装结果里没有），避免重解压几百 MB
+            try {
+                materializeLibjvm(appContext, javaMajor)
+                _state.update {
+                    it.copy(
+                        status = JreStatus.READY, abi = abi, javaHome = home, javaMajor = javaMajor,
+                        javaVersion = readJavaVersion(home), progress = 1f, error = null,
+                    )
+                }
+            } catch (t: Throwable) {
+                _state.update { it.copy(status = JreStatus.FAILED, error = t.message ?: t.toString()) }
             }
             return@withContext
         }
@@ -83,27 +123,37 @@ object JreManager {
         try {
             home.deleteRecursively()
             home.parentFile?.mkdirs()
-            var count = 0
-            appContext.assets.open("jre/$abi/$javaMajor.zip").use { asset ->
-                ZipInputStream(asset.buffered(1 shl 16)).use { zis ->
-                    while (true) {
-                        val entry = zis.nextEntry ?: break
-                        val out = File(home, entry.name)
-                        if (entry.isDirectory) {
-                            out.mkdirs()
-                        } else {
-                            out.parentFile.mkdirs()
-                            zis.copyTo(out.outputStream().buffered(1 shl 16))
-                            setPerms(out, executable = entry.name.endsWith(".so"))
+
+            // assets 流直接接 ZipInputStream 在部分设备上会解出 0 字节小文件，
+            // 先原样拷成临时文件再用 ZipFile 按条目读，稳定且能取真实总数算进度。
+            val tmpZip = File(appContext.cacheDir, "jre-$abi-$javaMajor.zip")
+            appContext.assets.open("jre/$abi/$javaMajor.zip").use { input ->
+                tmpZip.outputStream().use { input.copyTo(it) }
+            }
+            java.util.zip.ZipFile(tmpZip).use { zf ->
+                val entries = zf.entries().toList()
+                var count = 0
+                for (entry in entries) {
+                    val out = File(home, entry.name)
+                    if (entry.isDirectory) {
+                        out.mkdirs()
+                    } else {
+                        out.parentFile.mkdirs()
+                        zf.getInputStream(entry).use { input ->
+                            out.outputStream().use { input.copyTo(it) }
                         }
-                        zis.closeEntry()
-                        count++
-                        if (count % 20 == 0) {
-                            _state.update { it.copy(progress = (count.toFloat() / ZIP_ENTRY_COUNT_GUESS).coerceAtMost(0.99f)) }
+                        setPerms(out, executable = entry.name.endsWith(".so"))
+                    }
+                    count++
+                    if (count % 20 == 0) {
+                        _state.update {
+                            it.copy(progress = (count.toFloat() / entries.size).coerceAtMost(0.99f))
                         }
                     }
                 }
             }
+            tmpZip.delete()
+            materializeLibjvm(appContext, javaMajor)
             File(home, ".mcs-extracted").writeText("abi=$abi java=$javaMajor")
             _state.update {
                 it.copy(

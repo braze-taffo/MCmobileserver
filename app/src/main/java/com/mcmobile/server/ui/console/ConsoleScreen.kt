@@ -53,6 +53,7 @@ import com.mcmobile.server.ui.theme.ConsoleTextStyle
 fun ConsoleScreen(vm: AppViewModel, nav: NavController) {
     val lines by vm.consoleLines.collectAsState()
     val state by vm.consoleState.collectAsState()
+    val lanAddress by vm.lanAddress.collectAsState()
     var input by remember { mutableStateOf("") }
     val listState = rememberLazyListState()
     val clipboard = LocalClipboardManager.current
@@ -150,6 +151,31 @@ fun ConsoleScreen(vm: AppViewModel, nav: NavController) {
                             color = MaterialTheme.colorScheme.onErrorContainer,
                         )
                         TextButton(onClick = { nav.popBackStack() }) { Text("返回") }
+                    }
+                }
+            }
+            // 同一 Wi-Fi 下电脑端 MC 客户端填这个地址即可进入（服务器没跑时不显示）
+            lanAddress?.let { address ->
+                Surface(color = MaterialTheme.colorScheme.surfaceVariant, modifier = Modifier.fillMaxWidth()) {
+                    Row(
+                        Modifier.padding(start = 16.dp, end = 4.dp, top = 6.dp, bottom = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(Modifier.weight(1f)) {
+                            Text(
+                                "局域网地址（电脑端 MC 客户端填这个）",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            Text(
+                                address,
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.Bold,
+                            )
+                        }
+                        IconButton(onClick = {
+                            clipboard.setText(AnnotatedString(address))
+                        }) { Icon(Icons.Default.ContentCopy, "复制地址") }
                     }
                 }
             }

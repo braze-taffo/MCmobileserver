@@ -21,6 +21,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -41,6 +42,7 @@ import java.io.File
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun PropertiesScreen(vm: AppViewModel, instance: ServerInstance, nav: NavController) {
+    val consoleState by ConsoleSession.state.collectAsState()
     var props by remember { mutableStateOf<ServerProperties?>(null) }
     var edits by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
     var saved by remember { mutableStateOf(false) }
@@ -81,7 +83,7 @@ fun PropertiesScreen(vm: AppViewModel, instance: ServerInstance, nav: NavControl
         }
 
         Column(Modifier.fillMaxSize().padding(padding)) {
-            if (ConsoleSession.state.value.serverStatus == "RUNNING") {
+            if (consoleState.serverStatus == "RUNNING") {
                 Text(
                     "⚠ 服务器运行中，保存的改动将在下次重启后生效",
                     Modifier.padding(horizontal = 16.dp, vertical = 6.dp),

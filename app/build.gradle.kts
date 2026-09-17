@@ -69,19 +69,22 @@ android {
             ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
         }
         release {
-            isMinifyEnabled = false
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
             ndk { abiFilters += listOf("arm64-v8a") }
-            val keystoreProps = File(rootDir, "keystore.properties")
+            val keystoreProps = File(rootDir, "release-signing.properties")
             if (keystoreProps.exists()) {
                 val props = Properties().apply { keystoreProps.inputStream().use { load(it) } }
+                for (key in listOf("storeFile", "storePassword", "keyAlias", "keyPassword")) {
+                    require(!props.getProperty(key).isNullOrBlank()) { "Missing release signing property: $key" }
+                }
                 signingConfig = signingConfigs.create("release") {
                     storeFile = File(rootDir, props.getProperty("storeFile"))
                     storePassword = props.getProperty("storePassword")
                     keyAlias = props.getProperty("keyAlias")
                     keyPassword = props.getProperty("keyPassword")
                 }
-            } else {
-                signingConfig = signingConfigs.getByName("debug")
             }
         }
     }
@@ -102,7 +105,7 @@ android {
             useLegacyPackaging = true
             keepDebugSymbols += "**/libfrpc.so"
             // mobile 构建已做过符号剥离；AGP 再 strip 会损坏 libjvm.so
-            keepDebugSymbols += "**/libjvm.so"
+            keepDebugSymbols += "**/libjvm*.so"
         }
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
@@ -116,12 +119,22 @@ android {
     }
 }
 
+// Keep debug builds usable on a fresh checkout, but never distribute an unsigned/debug-signed release.
+tasks.matching { it.name == "preReleaseBuild" }.configureEach {
+    doFirst {
+        check(rootProject.file("release-signing.properties").isFile) {
+            "Release signing is required. Create release-signing.properties from release-signing.properties.example."
+        }
+    }
+}
+
 dependencies {
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(libs.androidx.lifecycle.runtime.compose)
     implementation(libs.androidx.lifecycle.viewmodel.compose)
     implementation(libs.androidx.lifecycle.service)
+    implementation(libs.androidx.lifecycle.process)
     implementation(libs.androidx.activity.compose)
     implementation(platform(libs.compose.bom))
     implementation(libs.compose.ui)

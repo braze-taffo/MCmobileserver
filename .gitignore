@@ -1,5 +1,6 @@
 # Gradle
 .gradle/
+.kotlin/
 build/
 app/build/
 app/.cxx/
@@ -23,6 +24,9 @@ local.properties
 !debug.keystore
 keystore/
 keystore.properties
+release-signing.properties
+*.p12
+*.jks
 
 # JRE artifacts (downloaded/repacked by Gradle task)
 app/src/main/assets/jre/

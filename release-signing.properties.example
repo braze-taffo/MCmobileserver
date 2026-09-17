@@ -1,0 +1,5 @@
+# Copy to release-signing.properties and fill in local credentials. Never commit that file.
+storeFile=keystore/distribution/mcmobileserver-release.p12
+storePassword=REPLACE_WITH_LOCAL_PASSWORD
+keyAlias=mcmobileserver-release
+keyPassword=REPLACE_WITH_LOCAL_PASSWORD

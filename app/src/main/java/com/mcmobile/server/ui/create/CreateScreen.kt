@@ -154,68 +154,70 @@ fun CreateScreen(vm: AppViewModel, nav: NavController) {
             )
         },
     ) { padding ->
-        when (step) {
-            0 -> TypeStep { t ->
-                type = t
-                useImport = false
-                step = 1
-            }
+        Column(Modifier.fillMaxSize().padding(padding)) {
+            when (step) {
+                0 -> TypeStep { t ->
+                    type = t
+                    useImport = false
+                    step = 1
+                }
 
-            1 -> {
-                val versions = produceVersionList(type)
-                VersionStep(
-                    state = versions,
-                    onPick = {
-                        selected = it
-                        name = "${type!!.label} ${it.mcVersion}"
-                        step = 2
-                    },
-                    onImport = {
-                        useImport = true
-                        name = ""
-                        step = 2
+                1 -> {
+                    val versions = produceVersionList(type)
+                    VersionStep(
+                        state = versions,
+                        onPick = {
+                            selected = it
+                            name = "${type!!.label} ${it.mcVersion}"
+                            step = 2
+                        },
+                        onImport = {
+                            useImport = true
+                            name = ""
+                            step = 2
+                        },
+                    )
+                }
+
+                2 -> ConfigStep(
+                    typeLabel = type!!.label,
+                    selected = selected,
+                    isImport = useImport,
+                    name = name,
+                    onName = { name = it },
+                    heapMb = heapMb,
+                    onHeap = { heapMb = it },
+                    heapCap = heapCap,
+                    busy = busy,
+                    progress = progress,
+                    onImport = { importLauncher.launch(arrayOf("application/java-archive", "application/octet-stream")) },
+                    onCreate = {
+                        busy = true
+                        scope.launch {
+                            try {
+                                val inst = vm.createInstance(
+                                    name = name,
+                                    type = type!!,
+                                    mcVersion = selected?.mcVersion ?: "1.21.1",
+                                    coreVersion = selected?.coreVersion,
+                                    heapMb = heapMb,
+                                )
+                                vm.installer.install(inst)
+                                if (type!! == ServerType.FORGE || type!! == ServerType.NEOFORGE) {
+                                    vm.start(inst) // 触发安装器
+                                }
+                                nav.popBackStack()
+                            } catch (e: Exception) {
+                                android.widget.Toast.makeText(
+                                    context, "创建失败: ${e.message}", android.widget.Toast.LENGTH_LONG,
+                                ).show()
+                            } finally {
+                                busy = false
+                            }
+                        }
                     },
                 )
             }
-
-            2 -> ConfigStep(
-                typeLabel = type!!.label,
-                selected = selected,
-                isImport = useImport,
-                name = name,
-                onName = { name = it },
-                heapMb = heapMb,
-                onHeap = { heapMb = it },
-                heapCap = heapCap,
-                busy = busy,
-                progress = progress,
-                onImport = { importLauncher.launch(arrayOf("application/java-archive", "application/octet-stream")) },
-                onCreate = {
-                    busy = true
-                    scope.launch {
-                        try {
-                            val inst = vm.createInstance(
-                                name = name,
-                                type = type!!,
-                                mcVersion = selected?.mcVersion ?: "1.21.1",
-                                coreVersion = selected?.coreVersion,
-                                heapMb = heapMb,
-                            )
-                            vm.installer.install(inst)
-                            if (type!! == ServerType.FORGE || type!! == ServerType.NEOFORGE) {
-                                vm.start(inst) // 触发安装器
-                            }
-                            nav.popBackStack()
-                        } catch (e: Exception) {
-                            android.widget.Toast.makeText(
-                                context, "创建失败: ${e.message}", android.widget.Toast.LENGTH_LONG,
-                            ).show()
-                        } finally {
-                            busy = false
-                        }
-                    }
-                },
-            )
         }
     }
 }

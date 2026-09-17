@@ -22,6 +22,9 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.Switch
+import androidx.compose.material3.TextButton
+import com.mcmobile.server.ui.UpdateViewModel
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -39,10 +42,11 @@ import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SettingsScreen(vm: AppViewModel, nav: NavController) {
+fun SettingsScreen(vm: AppViewModel, nav: NavController, updates: UpdateViewModel) {
     val context = LocalContext.current
     val jreState by JreManager.state.collectAsState()
     val scope = androidx.compose.runtime.rememberCoroutineScope()
+    val update by updates.state.collectAsState()
 
     LaunchedEffect(Unit) {
         // 展示两个运行时的就绪状态（不主动解压 25，按需在使用时解压）
@@ -68,6 +72,25 @@ fun SettingsScreen(vm: AppViewModel, nav: NavController) {
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
+            Card(Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("应用更新", style = MaterialTheme.typography.titleMedium)
+                    Text("当前版本：${updates.currentVersion}")
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text("打开应用时自动检查")
+                            Text("从 GitHub 获取正式发行版本", style = MaterialTheme.typography.bodySmall)
+                        }
+                        Switch(checked = update.autoCheck, onCheckedChange = updates::setAutoCheck)
+                    }
+                    if (update.checking) LinearProgressIndicator(Modifier.fillMaxWidth())
+                    update.message?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
+                    Button(enabled = !update.checking, onClick = { updates.check(manual = true) }) {
+                        Text(if (update.checking) "正在检查…" else "检查更新")
+                    }
+                    if (update.release != null) TextButton(onClick = updates::showRelease) { Text("查看新版本") }
+                }
+            }
             Card {
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text("内嵌 Java 运行时", style = MaterialTheme.typography.titleMedium)
@@ -131,7 +154,7 @@ fun SettingsScreen(vm: AppViewModel, nav: NavController) {
                 Column(Modifier.padding(16.dp)) {
                     Text("关于", style = MaterialTheme.typography.titleMedium)
                     Text(
-                        "MC Mobile Server 1.0.0\n内嵌 OpenJDK 21/25（AngelAuraMC mobile 构建）",
+                        "MC Mobile Server ${updates.currentVersion}\n作者：${com.mcmobile.server.ui.AppLinks.AUTHOR}\n内嵌 OpenJDK 21/25（AngelAuraMC mobile 构建）",
                         style = MaterialTheme.typography.bodySmall,
                     )
                 }

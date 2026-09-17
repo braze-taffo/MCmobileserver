@@ -2,8 +2,6 @@ package com.mcmobile.server.ui
 
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.getValue
 import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.compose.NavHost
@@ -16,6 +14,7 @@ import com.mcmobile.server.ui.settings.SettingsScreen
 
 object Routes {
     const val HOME = "home"
+    const val SERVERS = "servers"
     const val CREATE = "create"
     const val CONSOLE = "console"
     const val SETTINGS = "settings"
@@ -28,9 +27,8 @@ object Routes {
 }
 
 @Composable
-fun MCServerApp(vm: AppViewModel = viewModel()) {
+fun MCServerApp(vm: AppViewModel = viewModel(), updates: UpdateViewModel = viewModel()) {
     val nav = rememberNavController()
-    val events by vm.events.collectAsState(initial = null)
     val context = LocalContext.current
 
     LaunchedEffect(Unit) {
@@ -47,10 +45,11 @@ fun MCServerApp(vm: AppViewModel = viewModel()) {
     }
 
     NavHost(navController = nav, startDestination = Routes.HOME) {
-        composable(Routes.HOME) { HomeScreen(vm, nav) }
+        composable(Routes.HOME) { com.mcmobile.server.ui.home.DashboardScreen(vm, updates, nav) }
+        composable(Routes.SERVERS) { HomeScreen(vm, nav) }
         composable(Routes.CREATE) { CreateScreen(vm, nav) }
         composable(Routes.CONSOLE) { ConsoleScreen(vm, nav) }
-        composable(Routes.SETTINGS) { SettingsScreen(vm, nav) }
+        composable(Routes.SETTINGS) { SettingsScreen(vm, nav, updates) }
         composable(Routes.FRP) { com.mcmobile.server.ui.frp.FrpScreen(nav) }
         composable(Routes.PROPERTIES) { entry ->
             val id = entry.arguments?.getString("id")
@@ -71,4 +70,5 @@ fun MCServerApp(vm: AppViewModel = viewModel()) {
             }
         }
     }
+    UpdateDialog(updates)
 }

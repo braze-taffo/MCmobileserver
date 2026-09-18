@@ -1,9 +1,16 @@
 package com.mcmobile.server.ui.create
 
+import android.Manifest
 import android.app.ActivityManager
 import android.content.Context
+import android.content.Intent
+import android.net.Uri
+import android.os.Build
+import android.provider.OpenableColumns
+import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -14,11 +21,12 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -30,14 +38,13 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -46,9 +53,12 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.navigation.NavController
 import com.mcmobile.server.core.CoreInstaller
+import com.mcmobile.server.core.CoreJarInspector
 import com.mcmobile.server.core.McVersions
+import com.mcmobile.server.core.storage.StorageLocation
 import com.mcmobile.server.data.ServerInstance
 import com.mcmobile.server.data.ServerType
+import com.mcmobile.server.data.StorageKind
 import com.mcmobile.server.data.api.CoreApi
 import com.mcmobile.server.ui.AppViewModel
 import kotlinx.coroutines.Dispatchers
@@ -69,6 +79,40 @@ private data class VersionItem(
     val label: String,
 )
 
+/** 合法的 MC 版本号形态（1.21.1 / 26.2 …） */
+private val MC_VERSION_FORMAT = Regex("^\\d+(\\.\\d+)+$")
+
+/** 文件名兜底用：要求至少一个点，挡掉 "server-64.jar" 这类把 build 号当版本的输入 */
+private val FILENAME_VERSION = Regex("\\d+(?:\\.\\d+)+")
+
+/** 从文件名猜 MC 版本（jar 内部读不出来时才用） */
+private fun guessMcVersionFromName(fileName: String, type: ServerType?): String? {
+    val raw = FILENAME_VERSION.find(fileName)?.value ?: return null
+    if (type != ServerType.NEOFORGE && type != ServerType.FORGE) return raw
+    // Forge/NeoForge 文件名里的数字既可能是 MC 版本（1.21.1）也可能是 loader 版本（21.1.57 / 26.2.0.88）
+    return if (raw.startsWith("1.") && McVersions.isSupported(raw)) raw
+    else McVersions.mcVersionOfNeoForge(raw) ?: raw
+}
+
+private fun kindLabel(kind: CoreJarInspector.Kind): String = when (kind) {
+    CoreJarInspector.Kind.VANILLA -> "Vanilla 原版"
+    CoreJarInspector.Kind.PAPER -> "Paper"
+    CoreJarInspector.Kind.FOLIA -> "Folia"
+    CoreJarInspector.Kind.FABRIC -> "Fabric"
+    CoreJarInspector.Kind.FORGE -> "Forge"
+    CoreJarInspector.Kind.NEOFORGE -> "NeoForge"
+}
+
+private fun kindMatchesType(kind: CoreJarInspector.Kind?, type: ServerType?): Boolean = when {
+    kind == null || type == null -> true
+    kind == CoreJarInspector.Kind.VANILLA -> type == ServerType.VANILLA
+    kind == CoreJarInspector.Kind.PAPER -> type == ServerType.PAPER
+    kind == CoreJarInspector.Kind.FOLIA -> type == ServerType.FOLIA
+    kind == CoreJarInspector.Kind.FABRIC -> type == ServerType.FABRIC
+    kind == CoreJarInspector.Kind.FORGE -> type == ServerType.FORGE
+    else -> type == ServerType.NEOFORGE
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun CreateScreen(vm: AppViewModel, nav: NavController) {
@@ -80,6 +124,15 @@ fun CreateScreen(vm: AppViewModel, nav: NavController) {
     var useImport by remember { mutableStateOf(false) }
     var selected by remember { mutableStateOf<VersionItem?>(null) }
     var name by remember { mutableStateOf("") }
+
+    // 导入：已选文件与其识别结果
+    var importFile by remember { mutableStateOf<File?>(null) }
+    var importName by remember { mutableStateOf("") }
+    var mcVersionInput by remember { mutableStateOf("") }
+    var detectedJava by remember { mutableStateOf<Int?>(null) }
+    var detectedCore by remember { mutableStateOf<String?>(null) }
+    var typeHint by remember { mutableStateOf<String?>(null) }
+
     val totalRamMb = remember {
         val am = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
         val mi = ActivityManager.MemoryInfo()
@@ -92,55 +145,128 @@ fun CreateScreen(vm: AppViewModel, nav: NavController) {
     val progress by vm.installer.progress.collectAsState()
     var busy by remember { mutableStateOf(false) }
 
+    // 实例存放位置：默认应用私有存储，可选用户能直接访问的目录
+    var storage by remember { mutableStateOf(StorageKind.INTERNAL) }
+    var externalRoot by remember { mutableStateOf<File?>(null) }
+
+    fun toast(message: String) {
+        Toast.makeText(context, message, Toast.LENGTH_LONG).show()
+    }
+
+    val treeLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocumentTree(),
+    ) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        // 记住这次授权，否则应用重启后系统会收回（有全盘权限时用不上，但没有它授权只在当次有效）
+        runCatching {
+            context.contentResolver.takePersistableUriPermission(
+                uri,
+                Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION,
+            )
+        }
+        // 选择器给的是 content URI，JVM 需要真实路径；映射不出来（云盘等）就直接拒绝
+        when (val picked = StorageLocation.resolvePicked(uri)) {
+            is StorageLocation.Resolution.Ok -> {
+                val problem = StorageLocation.checkWritable(picked.dir)
+                if (problem == null) {
+                    externalRoot = picked.dir
+                } else {
+                    externalRoot = null
+                    toast(problem)
+                }
+            }
+
+            is StorageLocation.Resolution.Rejected -> {
+                externalRoot = null
+                toast(picked.reason)
+            }
+        }
+    }
+
+    val legacyPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        if (granted) treeLauncher.launch(null)
+        else toast("没有存储写权限，无法在共享存储里创建实例")
+    }
+
+    // 授权页不返回结果，回到应用后自己再查一次权限
+    val allFilesLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult(),
+    ) {
+        if (StorageLocation.hasWriteAccess(context)) {
+            treeLauncher.launch(null)
+        } else {
+            toast("没有「所有文件访问权限」，无法在共享存储里创建实例")
+        }
+    }
+
+    fun pickDirectory() {
+        when {
+            StorageLocation.hasWriteAccess(context) -> treeLauncher.launch(null)
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.R ->
+                allFilesLauncher.launch(StorageLocation.permissionSettingsIntent(context))
+
+            else -> legacyPermissionLauncher.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+        }
+    }
+
+    /** SAF 只给 content URI，真正的文件名要查 OpenableColumns；临时文件用唯一名，避免并发互相覆盖 */
+    fun displayNameOf(uri: Uri): String? =
+        context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
+            ?.use { cursor -> if (cursor.moveToFirst()) cursor.getString(0) else null }
+            ?: uri.lastPathSegment?.substringAfterLast('/')
+
     val importLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocument(),
     ) { uri ->
         if (uri == null) return@rememberLauncherForActivityResult
         busy = true
         scope.launch {
+            var tmp: File? = null
             try {
-                val tmp = File(context.cacheDir, "import-core.jar")
+                val picked = displayNameOf(uri) ?: "imported.jar"
+                tmp = File.createTempFile("import-core-", ".jar", context.cacheDir)
                 withContext(Dispatchers.IO) {
                     context.contentResolver.openInputStream(uri)!!.use { input ->
                         tmp.outputStream().use { input.copyTo(it) }
                     }
                 }
+                val detected = CoreJarInspector.detect(tmp)
                 val t = type ?: ServerType.VANILLA
-                // 从文件名猜版本
-                val guessed = Regex("(\\d+[\\.\\d+]*)").findAll(tmp.name)
-                    .map { it.value }.firstOrNull()
-                val mc = guessed?.let {
-                    // 归一：paper-1.21.1-133.jar → 1.21.1；neoforge-21.1.57 → 1.21.1
-                    if (t == ServerType.NEOFORGE || t == ServerType.FORGE) {
-                        val parts = it.split('.')
-                        if (parts.size >= 2 && parts[0].toIntOrNull() ?: 0 >= 20) "1.${parts[0]}.${parts[1]}" else it
-                    } else it
-                } ?: "1.21.1"
-                val inst = vm.createInstance(
-                    name = name.ifBlank { tmp.name.removeSuffix(".jar") },
-                    type = t,
-                    mcVersion = mc,
-                    coreVersion = null,
-                    heapMb = heapMb,
-                )
-                val ok = if (t == ServerType.FORGE || t == ServerType.NEOFORGE) {
-                    vm.installer.importInstaller(inst, tmp)
-                } else {
-                    vm.installer.importJar(inst, tmp)
-                }
-                if (t == ServerType.FORGE || t == ServerType.NEOFORGE) {
-                    // 导入的安装器：直接触发安装流程
-                    vm.start(inst)
-                }
-                nav.popBackStack()
+                val mc = detected?.mcVersion ?: guessMcVersionFromName(picked, t)
+
+                importFile = tmp
+                importName = picked
+                mcVersionInput = mc ?: ""
+                detectedJava = detected?.requiredJava
+                detectedCore = detected?.coreVersion
+                typeHint = detected?.kind?.takeIf { !kindMatchesType(it, t) }
+                    ?.let { "注意：这个 jar 是 ${kindLabel(it)}，与所选类型 ${t.label} 不一致，请确认" }
+                if (name.isBlank()) name = picked.removeSuffix(".jar")
+                if (mc == null) toast("无法从 jar 或文件名识别 MC 版本，请手动填写")
             } catch (e: Exception) {
-                android.widget.Toast.makeText(context, "导入失败: ${e.message}",
-                    android.widget.Toast.LENGTH_LONG).show()
+                tmp?.delete()
+                toast("读取 jar 失败: ${e.message}")
             } finally {
                 busy = false
             }
         }
     }
+
+    val mcText = if (useImport) mcVersionInput.trim() else selected?.mcVersion.orEmpty()
+    val formatOk = MC_VERSION_FORMAT.matches(mcText)
+    val versionError = when {
+        !useImport -> null
+        mcText.isBlank() -> "未能识别 MC 版本，请手动填写（如 1.21.1 / 26.2）"
+        !formatOk -> "版本号格式不对，应形如 1.21.1 / 26.2"
+        !McVersions.isSupported(mcText) -> "内置运行时跑不了 MC $mcText（需要 Java ${McVersions.requiredJava(mcText)}）"
+        else -> null
+    }
+    val importReady = !useImport || importFile != null
+    val storageReady = storage == StorageKind.INTERNAL || externalRoot != null
+    val canCreate =
+        (if (useImport) importFile != null && versionError == null else selected != null) && storageReady
 
     Scaffold(
         topBar = {
@@ -159,6 +285,12 @@ fun CreateScreen(vm: AppViewModel, nav: NavController) {
                 0 -> TypeStep { t ->
                     type = t
                     useImport = false
+                    selected = null
+                    importFile = null
+                    mcVersionInput = ""
+                    detectedJava = null
+                    detectedCore = null
+                    typeHint = null
                     step = 1
                 }
 
@@ -173,6 +305,12 @@ fun CreateScreen(vm: AppViewModel, nav: NavController) {
                         },
                         onImport = {
                             useImport = true
+                            selected = null
+                            importFile = null
+                            mcVersionInput = ""
+                            detectedJava = null
+                            detectedCore = null
+                            typeHint = null
                             name = ""
                             step = 2
                         },
@@ -180,38 +318,87 @@ fun CreateScreen(vm: AppViewModel, nav: NavController) {
                 }
 
                 2 -> ConfigStep(
-                    typeLabel = type!!.label,
+                    typeLabel = type?.label ?: "",
                     selected = selected,
                     isImport = useImport,
+                    importReady = importReady,
+                    importedName = importName,
+                    mcVersion = mcText,
+                    onMcVersion = { mcVersionInput = it },
+                    mcPreview = if (formatOk) {
+                        McVersions.bundledJavaMajorFor(detectedJava ?: McVersions.requiredJava(mcText))
+                    } else null,
+                    versionError = versionError,
+                    typeHint = typeHint,
                     name = name,
                     onName = { name = it },
                     heapMb = heapMb,
                     onHeap = { heapMb = it },
                     heapCap = heapCap,
+                    storage = storage,
+                    onStorage = { storage = it },
+                    externalRoot = externalRoot,
+                    onPickDirectory = { pickDirectory() },
                     busy = busy,
-                    progress = progress,
-                    onImport = { importLauncher.launch(arrayOf("application/java-archive", "application/octet-stream")) },
+                    canCreate = canCreate,
+                    // 只在本次操作进行中显示进度：installer.progress 是常驻状态，
+                    // 直接展示会让新建的实例顶着上一个实例（甚至已删除实例）的"下载中"体积
+                    progress = progress.takeIf { busy },
+                    onPickFile = {
+                        importLauncher.launch(
+                            arrayOf("application/java-archive", "application/octet-stream"),
+                        )
+                    },
                     onCreate = {
                         busy = true
                         scope.launch {
+                            var created: ServerInstance? = null
                             try {
+                                val t = type ?: error("未选择核心类型")
+                                val mc = if (useImport) mcText else (selected?.mcVersion ?: error("未选择 MC 版本"))
+                                if (useImport && importFile == null) error("请先选择 jar 文件")
                                 val inst = vm.createInstance(
-                                    name = name,
-                                    type = type!!,
-                                    mcVersion = selected?.mcVersion ?: "1.21.1",
-                                    coreVersion = selected?.coreVersion,
+                                    name = name.ifBlank {
+                                        if (useImport) importName.removeSuffix(".jar") else "${t.label} $mc"
+                                    },
+                                    type = t,
+                                    mcVersion = mc,
+                                    coreVersion = if (useImport) detectedCore else selected?.coreVersion,
                                     heapMb = heapMb,
+                                    requiredJava = if (useImport) detectedJava else null,
+                                    storage = storage,
+                                    externalRoot = externalRoot?.absolutePath,
                                 )
-                                vm.installer.install(inst)
-                                if (type!! == ServerType.FORGE || type!! == ServerType.NEOFORGE) {
-                                    vm.start(inst) // 触发安装器
+                                created = inst
+                                val needsInstaller = t == ServerType.FORGE || t == ServerType.NEOFORGE
+                                if (useImport) {
+                                    val source = importFile ?: error("请先选择 jar 文件")
+                                    val copied = if (needsInstaller) {
+                                        vm.installer.importInstaller(inst, source)
+                                    } else {
+                                        vm.installer.importJar(inst, source)
+                                    }
+                                    if (!copied) {
+                                        val why = (vm.installer.progress.value as? CoreInstaller.Progress.Error)?.message
+                                        error("导入失败：${why ?: "复制文件出错"}")
+                                    }
+                                } else {
+                                    val ready = vm.installer.install(inst)
+                                    // Forge/NeoForge 下载完安装器还要跑安装，返回值本就不代表"可用"
+                                    if (!needsInstaller && !ready) {
+                                        val why = (vm.installer.progress.value as? CoreInstaller.Progress.Error)?.message
+                                        error("核心下载失败：${why ?: "未知错误"}")
+                                    }
                                 }
+                                if (needsInstaller) vm.start(inst)
                                 nav.popBackStack()
                             } catch (e: Exception) {
-                                android.widget.Toast.makeText(
-                                    context, "创建失败: ${e.message}", android.widget.Toast.LENGTH_LONG,
-                                ).show()
+                                // 已经落盘的实例要回滚，否则首页会留下一个"看着建好了"的空壳
+                                created?.let { vm.delete(it) }
+                                toast("创建失败: ${e.message}")
                             } finally {
+                                importFile?.delete()
+                                importFile = null
                                 busy = false
                             }
                         }
@@ -238,6 +425,7 @@ private fun TypeStep(onPick: (ServerType) -> Unit) {
                             when (t) {
                                 ServerType.VANILLA -> "Mojang 官方服务端"
                                 ServerType.PAPER -> "高性能，支持插件"
+                                ServerType.FOLIA -> "区域化多线程，高并发（Paper 分支）"
                                 ServerType.FABRIC -> "轻量模组加载器"
                                 ServerType.FORGE -> "老牌模组加载器（1.18+）"
                                 ServerType.NEOFORGE -> "新一代模组加载器（1.20.1+）"
@@ -314,27 +502,68 @@ private fun ConfigStep(
     typeLabel: String,
     selected: VersionItem?,
     isImport: Boolean,
+    importReady: Boolean,
+    importedName: String,
+    mcVersion: String,
+    onMcVersion: (String) -> Unit,
+    mcPreview: Int?,
+    versionError: String?,
+    typeHint: String?,
     name: String,
     onName: (String) -> Unit,
     heapMb: Int,
     onHeap: (Int) -> Unit,
     heapCap: Int,
+    storage: StorageKind,
+    onStorage: (StorageKind) -> Unit,
+    externalRoot: File?,
+    onPickDirectory: () -> Unit,
     busy: Boolean,
-    progress: CoreInstaller.Progress,
-    onImport: () -> Unit,
+    canCreate: Boolean,
+    progress: CoreInstaller.Progress?,
+    onPickFile: () -> Unit,
     onCreate: () -> Unit,
 ) {
     Column(
         Modifier
             .fillMaxSize()
+            .verticalScroll(rememberScrollState())
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
-        Text("$typeLabel${selected?.let { " · MC ${it.mcVersion}" } ?: ""}",
-            style = MaterialTheme.typography.titleMedium)
-        if (selected != null && selected.coreVersion != null) {
-            Text("核心版本：${selected.coreVersion}",
-                style = MaterialTheme.typography.bodyMedium)
+        Text(
+            "$typeLabel${if (isImport) "" else selected?.let { " · MC ${it.mcVersion}" } ?: ""}",
+            style = MaterialTheme.typography.titleMedium,
+        )
+        if (!isImport && selected?.coreVersion != null) {
+            Text("核心版本：${selected.coreVersion}", style = MaterialTheme.typography.bodyMedium)
+        }
+
+        if (isImport && importReady) {
+            Text("来源：$importedName", style = MaterialTheme.typography.bodySmall)
+        }
+
+        if (isImport) {
+            OutlinedTextField(
+                value = mcVersion,
+                onValueChange = onMcVersion,
+                label = { Text("MC 版本") },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+                isError = versionError != null,
+                supportingText = {
+                    Text(
+                        versionError ?: mcPreview?.let { "将使用内置 Java $it" } ?: "",
+                        color = if (versionError != null) MaterialTheme.colorScheme.error
+                        else MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                },
+            )
+        }
+
+        if (typeHint != null) {
+            Text(typeHint, style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.tertiary)
         }
 
         OutlinedTextField(
@@ -344,6 +573,39 @@ private fun ConfigStep(
             modifier = Modifier.fillMaxWidth(),
             singleLine = true,
         )
+
+        Text("存储位置", style = MaterialTheme.typography.titleSmall)
+        StorageOption(
+            selected = storage == StorageKind.INTERNAL,
+            title = StorageKind.INTERNAL.label,
+            detail = "无需任何权限，读写最快；卸载应用时实例会一并删除",
+            onClick = { onStorage(StorageKind.INTERNAL) },
+        )
+        StorageOption(
+            selected = storage == StorageKind.EXTERNAL,
+            title = StorageKind.EXTERNAL.label,
+            detail = "文件管理器和电脑都能直接读写实例文件；需要「所有文件访问权限」，读写较慢",
+            onClick = { onStorage(StorageKind.EXTERNAL) },
+        )
+        if (storage == StorageKind.EXTERNAL) {
+            if (externalRoot == null) {
+                OutlinedButton(onClick = onPickDirectory, modifier = Modifier.fillMaxWidth()) {
+                    Text("选择存放文件夹")
+                }
+                Text(
+                    "还没有选择文件夹，无法创建",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                )
+            } else {
+                Text(
+                    "实例目录：${externalRoot.absolutePath}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                TextButton(onClick = onPickDirectory) { Text("重新选择文件夹") }
+            }
+        }
 
         Text("最大内存：${heapMb}MB", style = MaterialTheme.typography.bodyMedium)
         Slider(
@@ -369,7 +631,7 @@ private fun ConfigStep(
             else -> Unit
         }
 
-        Spacer(Modifier.weight(1f))
+        Spacer(Modifier.height(4.dp))
 
         if (busy) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -377,10 +639,42 @@ private fun ConfigStep(
                 Text("  处理中…")
             }
         } else {
-            Button(
-                onClick = if (isImport) onImport else onCreate,
-                modifier = Modifier.fillMaxWidth(),
-            ) { Text(if (isImport) "选择 jar 文件并导入" else "创建并下载核心") }
+            if (isImport && !importReady) {
+                OutlinedButton(onClick = onPickFile, modifier = Modifier.fillMaxWidth()) {
+                    Text("选择 jar 文件")
+                }
+            } else {
+                Button(
+                    onClick = onCreate,
+                    enabled = canCreate,
+                    modifier = Modifier.fillMaxWidth(),
+                ) { Text(if (isImport) "创建并导入" else "创建并下载核心") }
+            }
+        }
+    }
+}
+
+@Composable
+private fun StorageOption(
+    selected: Boolean,
+    title: String,
+    detail: String,
+    onClick: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        RadioButton(selected = selected, onClick = onClick)
+        Column(Modifier.weight(1f)) {
+            Text(title, style = MaterialTheme.typography.bodyLarge)
+            Text(
+                detail,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
     }
 }
@@ -402,35 +696,30 @@ private fun produceVersionList(type: ServerType?): VersionListState =
                     .filter { McVersions.isSupported(it) }
                     .map { VersionItem(it, label = "Minecraft $it") }
 
-                ServerType.PAPER -> CoreApi.paperFamilies()
-                    .filter { McVersions.isSupported(it) }
+                ServerType.PAPER -> CoreApi.paperVersions()
                     .map { VersionItem(it, label = "Paper $it") }
+
+                ServerType.FOLIA -> CoreApi.paperVersions("folia")
+                    .map { VersionItem(it, label = "Folia $it") }
 
                 ServerType.FABRIC -> CoreApi.fabricGameVersions()
                     .filter { McVersions.isRelease(it) && McVersions.isSupported(it) }
                     .map { VersionItem(it, label = "Fabric $it") }
 
-                ServerType.NEOFORGE -> {
-                    val all = CoreApi.neoForgeVersions()
-                    all.asSequence()
-                        .filter { Regex("^\\d+\\.\\d+\\.\\d+").matches(it) || Regex("^\\d+\\.\\d+\\.\\d+\\.\\d+(-beta)?$").matches(it) }
-                        .mapNotNull { v ->
-                            val short = v.substringBefore(".").let { major ->
-                                v.substringAfter("$major.").substringBefore(".")
-                            }
-                            // "21.1" ↔ MC 1.21.1；"26.2" ↔ MC 26.2（2026 日期式）
-                            val major = v.substringBefore('.').toIntOrNull() ?: return@mapNotNull null
-                            val minor = short.toIntOrNull() ?: return@mapNotNull null
-                            val mc = if (major >= 25) "$major.$minor" else "1.$major.$minor"
-                            mc to v
-                        }
-                        .filter { (mc, _) -> McVersions.isSupported(mc) }
-                        .groupBy({ it.first }, { it.second })
-                        .map { (mc, vers) ->
-                            val best = vers.lastOrNull { !it.endsWith("-beta") } ?: vers.last()
-                            VersionItem(mc, coreVersion = best, label = "NeoForge · MC $mc")
-                        }
-                }
+                ServerType.NEOFORGE -> CoreApi.neoForgeVersions()
+                    .asSequence()
+                    .filter {
+                        Regex("^\\d+\\.\\d+\\.\\d+").matches(it) ||
+                            Regex("^\\d+\\.\\d+\\.\\d+\\.\\d+(-beta)?$").matches(it)
+                    }
+                    // "21.1.219" ↔ MC 1.21.1；"26.2.0.88" ↔ MC 26.2（2026 日期式）
+                    .mapNotNull { v -> McVersions.mcVersionOfNeoForge(v)?.let { it to v } }
+                    .filter { (mc, _) -> McVersions.isSupported(mc) }
+                    .groupBy({ it.first }, { it.second })
+                    .map { (mc, vers) ->
+                        val best = vers.lastOrNull { !it.endsWith("-beta") } ?: vers.last()
+                        VersionItem(mc, coreVersion = best, label = "NeoForge · MC $mc")
+                    }
 
                 ServerType.FORGE -> CoreApi.forgePromos()
                     .filterKeys { McVersions.isSupported(it) && McVersions.compare(it, "1.18") >= 0 }

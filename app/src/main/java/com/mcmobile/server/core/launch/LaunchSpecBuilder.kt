@@ -7,7 +7,7 @@ import java.io.File
 
 /**
  * 由实例生成可执行的 LaunchSpec。
- * - Vanilla/Paper/Fabric：server.jar 的 Manifest Main-Class
+ * - Vanilla/Paper/Folia/Fabric：server.jar 的 Manifest Main-Class
  * - Forge/NeoForge：解析 unix_args.txt / user_jvm_args.txt
  */
 object LaunchSpecBuilder {
@@ -28,7 +28,7 @@ object LaunchSpecBuilder {
     private fun buildOrThrow(instance: ServerInstance, dir: File, javaHome: File): LaunchSpec {
         var argfileJvmOpts: List<String> = emptyList()
         val (classpath, mainClass, args) = when (instance.type) {
-            ServerType.VANILLA, ServerType.PAPER, ServerType.FABRIC -> {
+            ServerType.VANILLA, ServerType.PAPER, ServerType.FOLIA, ServerType.FABRIC -> {
                 val jar = findCoreJar(dir)
                     ?: throw IllegalStateException("实例目录中没有服务器核心 jar（server.jar）")
                 val main = ManifestReader.readMainClass(jar)
@@ -51,9 +51,18 @@ object LaunchSpecBuilder {
             }
         }
 
-        // 顺序：unix_args → user_jvm_args → 实例自定义 → 堆参数（后者覆盖前者）
+        // Paper/Folia 启动时会校验 java.version 是否属于官方 GA 版本，而内置 JVM 是自编译的
+        // 移动版 OpenJDK，运行时版本串形如 "25.0.5-internal"，会被判成 "non official version"
+        // 直接拒绝启动。该校验针对上游 GA 构建，对随应用分发的 JVM 不适用，按官方支持的方式关掉。
+        val coreJvmOpts = when (instance.type) {
+            ServerType.PAPER, ServerType.FOLIA -> listOf("-DPaper.IgnoreJavaVersion=true")
+            else -> emptyList()
+        }
+
+        // 顺序：unix_args → 核心专用 → 实例自定义 → 堆参数（后者覆盖前者）
         val jvmOpts = buildList {
             addAll(argfileJvmOpts)
+            addAll(coreJvmOpts)
             addAll(instance.extraJvmArgs)
             add("-Xms${instance.minHeapMb}M")
             add("-Xmx${instance.maxHeapMb}M")
@@ -68,6 +77,9 @@ object LaunchSpecBuilder {
             mainClass = mainClass,
             jvmOpts = jvmOpts,
             args = args,
+            // 必须显式传：落到默认值会让 26.x 在 javaHome 指向 25 的情况下仍加载 21 的 libjvm，
+            // HotSpot 按 libjvm 路径反推 java.home，结果整个服务器跑在 Java 21 上。
+            javaMajor = instance.javaMajor,
         )
     }
 

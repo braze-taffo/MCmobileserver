@@ -14,6 +14,7 @@ import android.system.Os
 import com.mcmobile.server.R
 import com.mcmobile.server.core.console.Ansi
 import com.mcmobile.server.core.console.ConsoleBridgeServer
+import com.mcmobile.server.core.console.StartConflict
 import com.mcmobile.server.core.jre.JreManager
 import com.mcmobile.server.core.jre.JreStatus
 import com.mcmobile.server.core.launch.JvmLauncher
@@ -76,6 +77,7 @@ class ServerForegroundService : Service() {
     data class StateMsg(
         val status: String,
         val name: String = "",
+        val instanceId: String? = null,
         val exitCode: Int? = null,
         val error: String? = null,
     )
@@ -120,19 +122,40 @@ class ServerForegroundService : Service() {
     }
 
     private fun handleStart(intent: Intent) {
-        if (status == RunStatus.RUNNING || status == RunStatus.STARTING) return
         val specJson = intent.getStringExtra(EXTRA_SPEC_JSON) ?: return
         val s = try {
             json.decodeFromString<LaunchSpec>(specJson)
         } catch (t: Throwable) {
             return
         }
+        // 本进程同时只跑一个实例。以前这里直接 return 丢掉请求，UI 那边却以为启动成功并跳到
+        // 控制台，于是显示的是上一个实例的日志——必须把冲突说出来。
+        val conflict = StartConflict.describe(
+            runningStatus = status.name,
+            runningInstanceId = spec?.instanceId,
+            runningName = spec?.name ?: "",
+            requestedId = s.instanceId,
+        )
+        if (conflict != null) {
+            bridge?.appendLine("[MC服务器] $conflict")
+            setStatus(status, error = conflict)
+            return
+        }
+        if (status == RunStatus.RUNNING || status == RunStatus.STARTING) return
         spec = s
         startForegroundCompat(buildNotification(s.name))
         scope.launch { runServer(s) }
     }
 
     private suspend fun runServer(s: LaunchSpec) = withContext(Dispatchers.IO) {
+        // 实例目录可能已经不存在（实例被删除、或磁盘被清理）：此时不能继续，
+        // 否则下面的 mkdirs() 会把删掉的目录重新建出来，跑一个"没有数据的服务器"。
+        if (!File(s.workDir).isDirectory) {
+            setStatus(RunStatus.FAILED, error = "实例目录不存在：${s.workDir}（可能已被删除）")
+            delay(1500)
+            shutdownNow(1)
+            return@withContext
+        }
         val logsDir = File(s.workDir, "logs").apply { mkdirs() }
         val logFile = File(logsDir, "run-latest.log").apply { delete() }
 
@@ -283,6 +306,7 @@ class ServerForegroundService : Service() {
                 StateMsg(
                     status = newStatus.name,
                     name = spec?.name ?: "",
+                    instanceId = spec?.instanceId,
                     exitCode = exit,
                     error = error,
                 ),

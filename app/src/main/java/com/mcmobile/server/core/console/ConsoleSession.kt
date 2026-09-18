@@ -13,10 +13,12 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import java.io.BufferedReader
@@ -34,9 +36,14 @@ object ConsoleSession {
         val status: String = "DISCONNECTED", // CONNECTED / DISCONNECTED / EXITED
         val serverStatus: String? = null,    // :server 进程广播的 RunStatus
         val name: String = "",
+        /** :server 进程正在跑的实例 id；控制台据此判断"这份日志属于哪个实例" */
+        val instanceId: String? = null,
         val exitCode: Int? = null,
         val error: String? = null,
     )
+
+    /** :server 进程当前正在跑的实例 */
+    data class Active(val instanceId: String?, val name: String, val status: String)
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
@@ -52,12 +59,12 @@ object ConsoleSession {
     private val connectMutex = Mutex()
 
     /** 尝试连接（:server 进程可能还在启动），最多等 ~8s */
-    suspend fun connect() = withContext(Dispatchers.IO) {
+    suspend fun connect(attempts: Int = 25) = withContext(Dispatchers.IO) {
         if (isConnected()) return@withContext
         connectMutex.withLock {
             if (isConnected()) return@withLock
             var lastError: Exception? = null
-            repeat(25) {
+            repeat(attempts) {
                 try {
                     val s = LocalSocket()
                     s.connect(
@@ -80,7 +87,31 @@ object ConsoleSession {
         }
     }
 
-    fun isConnected(): Boolean = socket?.isConnected == true && socket?.isClosed == false
+    /**
+     * 注意：不能写成 `socket.isClosed == false` —— Android 的 [LocalSocket.isClosed] 是
+     * 不支持的方法，一调用就抛 UnsupportedOperationException，会把 UI 进程直接带崩
+     * （真机复现：删掉实例后启动下一个实例，必崩）。socket 失效由 [readLoop] 退出时置 null 体现。
+     */
+    fun isConnected(): Boolean = socket?.isConnected == true
+
+    /**
+     * 连上 :server 进程并问清楚它现在在跑哪个实例。
+     *
+     * UI 进程被系统回收后重启时，只有这里能发现"还有服务器在跑"——否则会拿它当没在跑，
+     * 既可能重复启动，也可能把正在被使用的实例目录删掉。
+     * 连不上进程（= 没有服务器在跑）返回 null。
+     */
+    suspend fun activeServer(attempts: Int = 8, timeoutMs: Long = 1500): Active? {
+        if (!isConnected()) connect(attempts)
+        if (!isConnected()) return null
+        // 连上后本进程会先收到历史日志、再收到状态帧；等不到就用当前值兜底
+        val st = withTimeoutOrNull(timeoutMs) {
+            state.first { it.serverStatus != null || it.status == "EXITED" }
+        } ?: state.value
+        val serverStatus = st.serverStatus ?: return null
+        if (!StartConflict.isActive(serverStatus)) return null
+        return Active(st.instanceId, st.name, serverStatus)
+    }
 
     private suspend fun readLoop(s: LocalSocket) {
         try {
@@ -95,6 +126,7 @@ object ConsoleSession {
                                 status = "CONNECTED",
                                 serverStatus = msg.status,
                                 name = msg.name,
+                                instanceId = msg.instanceId,
                                 exitCode = msg.exitCode,
                                 error = msg.error,
                             )
@@ -111,6 +143,7 @@ object ConsoleSession {
             status = "EXITED",
             serverStatus = if (inferred || prev.serverStatus == null) "STOPPED" else prev.serverStatus,
             name = prev.name,
+            instanceId = prev.instanceId,
             exitCode = prev.exitCode,
             error = prev.error,
         )
@@ -144,6 +177,7 @@ object ConsoleSession {
     private data class ServerState(
         val status: String,
         val name: String = "",
+        val instanceId: String? = null,
         val exitCode: Int? = null,
         val error: String? = null,
     )

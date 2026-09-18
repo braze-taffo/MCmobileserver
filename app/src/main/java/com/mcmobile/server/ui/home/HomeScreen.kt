@@ -47,9 +47,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.navigation.NavController
 import com.mcmobile.server.data.ServerInstance
+import com.mcmobile.server.data.StorageKind
 import com.mcmobile.server.ui.AppViewModel
 import com.mcmobile.server.ui.Routes
 import com.mcmobile.server.ui.UiEvent
@@ -60,10 +62,69 @@ fun HomeScreen(vm: AppViewModel, nav: NavController) {
     val instances by vm.instances.collectAsState()
     val activeId by vm.activeInstanceId.collectAsState()
     val installingId by vm.installingId.collectAsState()
+    val deletingId by vm.deletingId.collectAsState()
+    val loadError by vm.loadError.collectAsState()
     var eulaInstance by remember { mutableStateOf<ServerInstance?>(null) }
+    var pendingDelete by remember { mutableStateOf<ServerInstance?>(null) }
 
     LaunchedEffect(Unit) {
         vm.events.collect { if (it is UiEvent.NeedEula) eulaInstance = it.instance }
+    }
+
+    // 删除不可撤销（地图、配置、日志一起没），必须二次确认
+    pendingDelete?.let { inst ->
+        val running = activeId == inst.id
+        val dirPath = vm.instanceDirOf(inst).absolutePath
+        if (inst.storage == StorageKind.EXTERNAL) {
+            // 外部目录在用户自己的文件空间里："只移出列表"和"连文件一起删"必须是两个选项
+            AlertDialog(
+                onDismissRequest = { pendingDelete = null },
+                title = { Text("移除“${inst.name}”？") },
+                text = {
+                    Text(
+                        "该实例位于用户可访问的目录：\n$dirPath\n\n" +
+                                "「仅从列表移除」保留磁盘上的全部文件。" +
+                                "「同时删除文件」会连同地图、配置、日志一起永久删除，无法撤销。" +
+                                if (running) "\n\n服务器正在运行，删除前会先把它停掉。" else "",
+                    )
+                },
+                confirmButton = {
+                    TextButton(onClick = {
+                        pendingDelete = null
+                        vm.delete(inst, deleteFiles = false)
+                    }) { Text("仅从列表移除") }
+                },
+                dismissButton = {
+                    Row {
+                        TextButton(onClick = { pendingDelete = null }) { Text("取消") }
+                        TextButton(onClick = {
+                            pendingDelete = null
+                            vm.delete(inst, deleteFiles = true)
+                        }) { Text("同时删除文件", color = MaterialTheme.colorScheme.error) }
+                    }
+                },
+            )
+        } else {
+            AlertDialog(
+                onDismissRequest = { pendingDelete = null },
+                title = { Text("删除“${inst.name}”？") },
+                text = {
+                    Text(
+                        "将永久删除该实例的全部内容（服务端核心、地图、配置、日志），无法撤销。" +
+                                if (running) "\n\n服务器正在运行，删除前会先把它停掉。" else "",
+                    )
+                },
+                confirmButton = {
+                    TextButton(onClick = {
+                        pendingDelete = null
+                        vm.delete(inst)
+                    }) { Text("删除", color = MaterialTheme.colorScheme.error) }
+                },
+                dismissButton = {
+                    TextButton(onClick = { pendingDelete = null }) { Text("取消") }
+                },
+            )
+        }
     }
 
     eulaInstance?.let { inst ->
@@ -126,32 +187,60 @@ fun HomeScreen(vm: AppViewModel, nav: NavController) {
             )
         },
     ) { padding ->
-        if (instances.isEmpty()) {
-            Box(Modifier.fillMaxSize().padding(padding), contentAlignment = Alignment.Center) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("还没有服务器实例", style = MaterialTheme.typography.titleMedium)
-                    Text("点击\"新建服务器\"开始", style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Column(Modifier.fillMaxSize().padding(padding)) {
+            // 清单损坏这类问题必须让用户看见：实例列表为空不代表"没有实例"
+            loadError?.let { message ->
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 8.dp),
+                ) {
+                    Row(
+                        Modifier.padding(start = 16.dp, top = 8.dp, bottom = 8.dp, end = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            message,
+                            modifier = Modifier.weight(1f),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                        TextButton(onClick = { vm.dismissLoadError() }) { Text("知道了") }
+                    }
                 }
             }
-        } else {
-            LazyColumn(
-                modifier = Modifier.fillMaxSize().padding(padding),
-                contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp),
-            ) {
-                items(instances, key = { it.id }) { inst ->
-                    InstanceCard(
-                        instance = inst,
-                        isActive = activeId == inst.id,
-                        installing = installingId == inst.id,
-                        onStart = { vm.start(inst) },
-                        onConsole = { nav.navigate(Routes.CONSOLE) },
-                        onProperties = { nav.navigate(Routes.properties(inst.id)) },
-                        onFiles = { nav.navigate(Routes.files(inst.id)) },
-                        onDelete = { vm.delete(inst) },
-                    )
+
+            if (instances.isEmpty()) {
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text("还没有服务器实例", style = MaterialTheme.typography.titleMedium)
+                        Text("点击\"新建服务器\"开始", style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
+            } else {
+                LazyColumn(
+                    modifier = Modifier.fillMaxSize(),
+                    contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    items(instances, key = { it.id }) { inst ->
+                        InstanceCard(
+                            instance = inst,
+                            dirPath = vm.instanceDirOf(inst).absolutePath,
+                            isActive = activeId == inst.id,
+                            installing = installingId == inst.id,
+                            deleting = deletingId == inst.id,
+                            // :server 进程同时只跑一个实例，别的实例在跑时启动按钮不可用
+                            canStart = activeId == null,
+                            onStart = { vm.start(inst) },
+                            onConsole = { nav.navigate(Routes.CONSOLE) },
+                            onProperties = { nav.navigate(Routes.properties(inst.id)) },
+                            onFiles = { nav.navigate(Routes.files(inst.id)) },
+                            onDelete = { pendingDelete = inst },
+                        )
+                    }
                 }
             }
         }
@@ -161,8 +250,11 @@ fun HomeScreen(vm: AppViewModel, nav: NavController) {
 @Composable
 private fun InstanceCard(
     instance: ServerInstance,
+    dirPath: String,
     isActive: Boolean,
     installing: Boolean,
+    deleting: Boolean,
+    canStart: Boolean,
     onStart: () -> Unit,
     onConsole: () -> Unit,
     onProperties: () -> Unit,
@@ -182,8 +274,22 @@ private fun InstanceCard(
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
+                    Spacer(Modifier.height(2.dp))
+                    // 实例在哪儿必须看得见：外部目录里的实例，用户要的是"我知道文件放在哪"
+                    Text(
+                        if (instance.storage == StorageKind.EXTERNAL) "外部目录 · $dirPath"
+                        else "应用内部存储",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
                 }
-                if (installing) {
+                if (deleting) {
+                    CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.dp)
+                    Spacer(Modifier.width(10.dp))
+                    Text("正在删除", style = MaterialTheme.typography.labelMedium)
+                } else if (installing) {
                     CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.dp)
                     Spacer(Modifier.width(10.dp))
                     Text("安装中", style = MaterialTheme.typography.labelMedium)
@@ -205,9 +311,10 @@ private fun InstanceCard(
                         Icon(Icons.Default.Terminal, "控制台")
                     }
                 } else {
-                    IconButton(onClick = onStart) {
+                    IconButton(onClick = onStart, enabled = canStart) {
                         Icon(Icons.Default.PlayArrow, "启动",
-                            tint = MaterialTheme.colorScheme.primary)
+                            tint = if (canStart) MaterialTheme.colorScheme.primary
+                            else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f))
                     }
                 }
                 IconButton(onClick = onFiles) {

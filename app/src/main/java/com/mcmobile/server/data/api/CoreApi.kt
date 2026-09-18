@@ -1,5 +1,6 @@
 package com.mcmobile.server.data.api
 
+import com.mcmobile.server.core.McVersions
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
@@ -113,13 +114,26 @@ object CoreApi {
 
     private const val FILL = "https://fill.papermc.io/v3"
 
-    suspend fun paperFamilies(): List<String> {
-        val root = json.parseToJsonElement(get("$FILL/projects/paper")).jsonObject
-        return root["versions"]!!.jsonObject.keys.toList()
+    /**
+     * 可下载的 Paper/Folia 版本。
+     *
+     * fill 的 `versions` 是「族 → 版本数组」的映射，族名（"1.21"、"26.1"）**不是**版本号：
+     * 拿族名当版本用会漏掉 1.21.11 / 26.1.2 这些真实版本，而且 26.1 这类族名下载必然 404。
+     * 所以这里展平 values，再滤掉 rc/pre。
+     */
+    suspend fun paperVersions(project: String = "paper"): List<String> {
+        val root = json.parseToJsonElement(get("$FILL/projects/$project")).jsonObject
+        return root["versions"]!!.jsonObject.values
+            .flatMap { family -> family.jsonArray.map { it.jsonPrimitive.content } }
+            .distinct()
+            .filter { McVersions.isRelease(it) && McVersions.isSupported(it) }
+            .sortedWith { a, b -> McVersions.compare(b, a) }
     }
 
-    suspend fun paperDownload(mcVersion: String): CoreDownload {
-        val b = json.parseToJsonElement(get("$FILL/projects/paper/versions/$mcVersion/builds/latest")).jsonObject
+    suspend fun paperDownload(mcVersion: String, project: String = "paper"): CoreDownload {
+        val b = json.parseToJsonElement(
+            get("$FILL/projects/$project/versions/$mcVersion/builds/latest"),
+        ).jsonObject
         val dl = b["downloads"]!!.jsonObject["server:default"]!!.jsonObject
         return CoreDownload(
             url = dl["url"]!!.jsonPrimitive.content,
@@ -134,18 +148,40 @@ object CoreApi {
 
     private const val FABRIC = "https://meta.fabricmc.net/v2"
 
+    /** Fabric 侧的一个构件（loader / installer），带官方 stable 标记 */
+    data class FabricArtifact(val version: String, val stable: Boolean)
+
     suspend fun fabricGameVersions(): List<String> {
         val arr = json.parseToJsonElement(get("$FABRIC/versions/game")).jsonArray
         return arr.map { it.jsonObject["version"]!!.jsonPrimitive.content }
     }
 
-    suspend fun fabricLoaderVersions(): List<String> {
-        val arr = json.parseToJsonElement(get("$FABRIC/versions/loader")).jsonArray
-        return arr.map { it.jsonObject["version"]!!.jsonPrimitive.content }
+    suspend fun fabricLoaderVersions(): List<FabricArtifact> = fabricArtifacts("loader")
+
+    suspend fun fabricInstallerVersions(): List<FabricArtifact> = fabricArtifacts("installer")
+
+    private suspend fun fabricArtifacts(kind: String): List<FabricArtifact> {
+        val arr = json.parseToJsonElement(get("$FABRIC/versions/$kind")).jsonArray
+        return arr.map { item ->
+            val obj = item.jsonObject
+            FabricArtifact(
+                version = obj["version"]!!.jsonPrimitive.content,
+                stable = obj["stable"]?.jsonPrimitive?.content?.toBoolean() ?: false,
+            )
+        }
     }
 
-    fun fabricServerJarUrl(mcVersion: String, loader: String): String =
-        "$FABRIC/versions/loader/$mcVersion/$loader/server/jar"
+    /** 列表里第一个 stable 版本号；全都不 stable 时退化为列表首个 */
+    fun newestStable(artifacts: List<FabricArtifact>): String? =
+        (artifacts.firstOrNull { it.stable } ?: artifacts.firstOrNull())?.version
+
+    /**
+     * server launcher 下载地址。
+     * 必须带 installer 版本段：meta 只提供 `/{game}/{loader}/{installer}/server/jar`，
+     * 缺该段的旧路径实测 404。
+     */
+    fun fabricServerJarUrl(mcVersion: String, loader: String, installer: String): String =
+        "$FABRIC/versions/loader/$mcVersion/$loader/$installer/server/jar"
 
     // ---------- NeoForge ----------
 

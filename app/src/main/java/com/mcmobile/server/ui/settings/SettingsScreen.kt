@@ -29,6 +29,11 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -37,8 +42,11 @@ import androidx.compose.ui.unit.dp
 import androidx.navigation.NavController
 import com.mcmobile.server.core.jre.JreManager
 import com.mcmobile.server.core.jre.JreStatus
+import com.mcmobile.server.core.storage.StorageLocation
+import com.mcmobile.server.data.StorageKind
 import com.mcmobile.server.ui.AppViewModel
 import kotlinx.coroutines.launch
+import java.io.File
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -47,6 +55,13 @@ fun SettingsScreen(vm: AppViewModel, nav: NavController, updates: UpdateViewMode
     val jreState by JreManager.state.collectAsState()
     val scope = androidx.compose.runtime.rememberCoroutineScope()
     val update by updates.state.collectAsState()
+    val instances by vm.instances.collectAsState()
+
+    // 授权页不返回结果，回到应用后重新查一次
+    var hasWriteAccess by remember { mutableStateOf(StorageLocation.hasWriteAccess(context)) }
+    val permissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult(),
+    ) { hasWriteAccess = StorageLocation.hasWriteAccess(context) }
 
     LaunchedEffect(Unit) {
         // 展示两个运行时的就绪状态（不主动解压 25，按需在使用时解压）
@@ -133,6 +148,55 @@ fun SettingsScreen(vm: AppViewModel, nav: NavController, updates: UpdateViewMode
                     }
                     jreState.javaVersion?.let {
                         Text("当前版本：OpenJDK $it", style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+            }
+
+            Card {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text("存储位置", style = MaterialTheme.typography.titleMedium)
+                    Text("应用内部存储", fontWeight = FontWeight.Medium,
+                        style = MaterialTheme.typography.bodyMedium)
+                    Text(
+                        File(context.filesDir, "servers").absolutePath,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    val externalRoots = instances
+                        .filter { it.storage == StorageKind.EXTERNAL }
+                        .mapNotNull { it.externalRoot }
+                        .distinct()
+                    if (externalRoots.isEmpty()) {
+                        Text(
+                            "还没有实例使用外部目录",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    } else {
+                        Text("用户可访问目录", fontWeight = FontWeight.Medium,
+                            style = MaterialTheme.typography.bodyMedium)
+                        for (root in externalRoots) {
+                            Text(
+                                root,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text("所有文件访问权限", style = MaterialTheme.typography.bodyMedium)
+                            Text(
+                                if (hasWriteAccess) "已授予"
+                                else "未授予；只有放在外部目录的实例需要它",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = if (hasWriteAccess) MaterialTheme.colorScheme.primary
+                                else MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        Button(onClick = {
+                            permissionLauncher.launch(StorageLocation.permissionSettingsIntent(context))
+                        }) { Text(if (hasWriteAccess) "查看" else "去授权") }
                     }
                 }
             }

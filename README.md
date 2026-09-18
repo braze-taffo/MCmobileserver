@@ -6,7 +6,7 @@
 
 OpenJDK、FRP 及其他第三方组件保留各自的版权、许可证与分发要求，不因本项目采用 AGPL-3.0 而改变。
 
-在 Android 手机 / 平板上运行 **Minecraft Java 版服务器**的应用。内嵌 Android 原生编译的 OpenJDK 运行时（21 与 25），支持 Vanilla / Paper / Fabric / Forge / **NeoForge** 五类服务端核心，提供下载、导入、启动、实时控制台、server.properties 编辑与文件管理。
+在 Android 手机 / 平板上运行 **Minecraft Java 版服务器**的应用。内嵌 Android 原生编译的 OpenJDK 运行时（21 与 25），支持 Vanilla / Paper / **Folia** / Fabric / Forge / **NeoForge** 六类服务端核心，提供下载、导入、启动、实时控制台、server.properties 编辑与文件管理。实例默认放在应用内部存储，也可以指定成文件管理器和电脑都能直接读写的目录。
 
 ## 运行原理（无任何模拟层）
 
@@ -26,7 +26,7 @@ OpenJDK、FRP 及其他第三方组件保留各自的版权、许可证与分发
 - `libjvm<-major>.so` 打包进 APK 的 `jniLibs`（原生库由 APK 提供），其余文件在首次启动时从 assets 解压到应用数据目录；解压时会把 libjvm **落一份到 `<javaHome>/lib/server/libjvm.so`** 并从那里加载——HotSpot 不认 `-Djava.home=`，它用 libjvm 的实际加载路径反推 `java.home`（`os::init_2()`），路径不对会直接 `Failed setting boot class path.` 退出。
 - 启动器还需两件事才跑得起来：创建 VM 前 `mallopt(M_BIONIC_SET_HEAP_TAGGING_LEVEL, 0)` 关掉 bionic 堆指针标记（Android 12+ 默认开启，会和 HotSpot 自己的顶字节用法冲突，表现为第一次 GC 后 SIGABRT），以及 main 返回后调 `DestroyJavaVM` 等非守护线程结束（vanilla 的 bundler 把服务器主类放在独立线程里跑，main 会立刻返回）。
 - 服务器作为**普通 Java 主类**通过 JNI 调用运行，不需要 `java` 启动器二进制，也从不 exec 数据目录中的文件。
-- MC 1.17–1.21.x 使用 Java 21；MC 26.x（2026 日期式版本）使用 Java 25，应用按版本自动选择。
+- MC 1.17–1.21.x 使用 Java 21；MC 26.x（2026 日期式版本）使用 Java 25。核心 jar 内声明了 Java 要求时以 jar 为准（Paper/Folia/Vanilla 的 `version.json` 带 `java_version`），否则按 MC 版本号推断；实际加载哪个 libjvm 由实例的 `javaMajor` 决定，`javaHome` 与它必须一致。
 
 ## 支持的服务端
 
@@ -34,11 +34,14 @@ OpenJDK、FRP 及其他第三方组件保留各自的版权、许可证与分发
 |---|---|---|
 | Vanilla | piston-meta（Mojang 官方） | 1.17+ release |
 | Paper | fill.papermc.io v3 | build 自动选最新 |
+| Folia | fill.papermc.io v3 | 区域化多线程的 Paper 分支 |
 | Fabric | meta.fabricmc.net | 自动附带原版 server.jar |
 | Forge | maven.minecraftforge.net | 1.18+，安装器在设备上执行 |
 | NeoForge | maven.neoforged.net | 1.20.1+ 全部（含 MC 26.x） |
 
-也支持从本地导入任意核心 jar / Forge/NeoForge 安装器 jar。
+也支持从本地导入任意核心 jar / Forge/NeoForge 安装器 jar。导入时优先读 jar 内部
+（`version.json` / `install_profile.json` / `install.properties`）拿到 MC 版本与 Java 要求，
+读不出来才退回文件名解析，识别结果可在创建前手动修正。
 
 ## 构建
 
@@ -66,6 +69,23 @@ OpenJDK、FRP 及其他第三方组件保留各自的版权、许可证与分发
 4. 控制台实时收发：输入 `list`、`say hi`、`stop` 等；工具栏支持优雅停止与强制结束。
 5. Forge/NeoForge 创建后自动在设备上跑安装器（需联网拉依赖），完成后即可启动。
 6. 实例文件页支持多选导入文件；点击「导入 Mod / ZIP」可批量导入 JAR 或 ZIP，压缩包中各层文件夹内的 JAR 会自动放入 `mods/`（其他文件忽略，同名文件跳过）。在 `mods/` 内直接导入 ZIP 也会自动解压。文件和文件夹右侧的删除按钮会弹出确认框，确认后永久删除；建议先停止服务器。配置页可编辑 server.properties。
+
+## 实例存放位置
+
+新建服务器时在配置页选择存放位置，之后可以在首页卡片上看到实例具体在哪个目录。
+
+**应用内部存储**（默认）：无需任何权限，读写最快，随应用卸载一起删除。文件只能通过应用内的文件页访问。
+
+**用户可访问目录**：用系统文件夹选择器指定（例如 `Documents/MCServers`），实测可放在内置共享存储或 SD 卡上。文件管理器、电脑和 adb 都能直接读写实例文件（改 `server.properties`、导入整合包、备份地图都不用经过应用）。
+
+选它之前需要知道这几件事：
+
+- 需要「所有文件访问权限」。首次选择目录时会跳到系统设置页，打开该开关后返回即可继续；设置页的「存储位置」卡片可随时查看授权状态和已使用的外部目录。
+- 共享存储是 FUSE 挂载，**读写明显慢于应用内部存储**（实测创建 500 个小文件：内部约 0.02 秒，共享存储 0.7–12 秒），启动、保存世界和插件读写配置都会变慢。
+- 不支持符号链接和硬链接，文件名不能包含 `:`；选 SD 卡时还有 exFAT 的单文件 4GB 上限。
+- 不要用其他应用或电脑移动、改名正在使用的实例目录，否则启动时会报「实例目录不存在」。
+- 删除外部实例时会问一次：只从列表移除（文件全部保留）还是连同地图、配置、日志一起删除。
+- 目录里会写入一个 `.mcs-instance.json` 标记文件，记录实例 ID、名称、类型和 MC 版本，便于日后辨认目录归属，请不要删除它。
 
 ## 首页、作者与应用更新
 

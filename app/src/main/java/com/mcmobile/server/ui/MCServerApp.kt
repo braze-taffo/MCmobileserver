@@ -39,6 +39,10 @@ fun MCServerApp(vm: AppViewModel = viewModel(), updates: UpdateViewModel = viewM
                     context, event.message, android.widget.Toast.LENGTH_LONG,
                 ).show()
 
+                is UiEvent.Info -> android.widget.Toast.makeText(
+                    context, event.message, android.widget.Toast.LENGTH_LONG,
+                ).show()
+
                 is UiEvent.NeedEula -> { /* EULA 弹窗由 HomeScreen 处理 */ }
             }
         }

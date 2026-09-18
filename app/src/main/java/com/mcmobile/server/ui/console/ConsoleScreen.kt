@@ -72,11 +72,10 @@ fun ConsoleScreen(vm: AppViewModel, nav: NavController) {
                         Text("控制台", fontWeight = FontWeight.Bold)
                         Text(
                             text = when (state.status) {
-                                "CONNECTED" -> state.serverStatus
-                                    ?: "已连接"
+                                "CONNECTED" -> state.serverStatus ?: "已连接"
                                 "EXITED" -> "已退出${state.exitCode?.let { "（code=$it）" } ?: ""}"
                                 else -> "未连接"
-                            },
+                            }.let { if (state.name.isBlank()) it else "${state.name} · $it" },
                             style = MaterialTheme.typography.labelSmall,
                         )
                     }
@@ -146,12 +145,22 @@ fun ConsoleScreen(vm: AppViewModel, nav: NavController) {
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Text(
-                            "服务器进程已结束",
+                            state.error ?: "服务器进程已结束",
                             Modifier.weight(1f),
                             color = MaterialTheme.colorScheme.onErrorContainer,
                         )
                         TextButton(onClick = { nav.popBackStack() }) { Text("返回") }
                     }
+                }
+            } else if (state.error != null) {
+                // 服务端运行期拒绝（如"已有服务器在运行"）必须让用户看到，
+                // 否则他只会看到一段不认识的旧日志
+                Surface(color = MaterialTheme.colorScheme.errorContainer, modifier = Modifier.fillMaxWidth()) {
+                    Text(
+                        state.error!!,
+                        Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                        color = MaterialTheme.colorScheme.onErrorContainer,
+                    )
                 }
             }
             // 同一 Wi-Fi 下电脑端 MC 客户端填这个地址即可进入（服务器没跑时不显示）

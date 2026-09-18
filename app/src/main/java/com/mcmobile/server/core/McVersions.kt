@@ -19,7 +19,19 @@ object McVersions {
         return a.compareTo(b)
     }
 
-    fun isRelease(id: String): Boolean = !id.contains(Regex("rc|pre|snapshot|exp|craftmine", RegexOption.IGNORE_CASE))
+    fun isRelease(id: String): Boolean =
+        !id.contains(Regex("rc|pre|snapshot|exp|craftmine|\\d{2}w\\d{2}[a-z]?", RegexOption.IGNORE_CASE))
+
+    /**
+     * NeoForge 版本号 → MC 版本：21.1.219 → 1.21.1；26.2.0.88 → 26.2；解析不了返回 null。
+     * 版本列表与导入归一化共用这一处，避免两条路径各写一份规则而互相矛盾。
+     */
+    fun mcVersionOfNeoForge(coreVersion: String): String? {
+        val major = coreVersion.substringBefore('.').toIntOrNull() ?: return null
+        val minor = coreVersion.substringAfter('.', "").substringBefore('.').toIntOrNull() ?: return null
+        if (major < 1 || minor < 0) return null
+        return if (major >= 25) "$major.$minor" else "1.$major.$minor"
+    }
 
     /**
      * 该 MC 版本服务器端要求的最低 Java 大版本。
@@ -47,6 +59,8 @@ object McVersions {
     }
 
     /** 应使用的内置 JRE 大版本 */
-    fun bundledJavaMajor(mcVersion: String): Int =
-        if (requiredJava(mcVersion) >= 25) 25 else 21
+    fun bundledJavaMajor(mcVersion: String): Int = bundledJavaMajorFor(requiredJava(mcVersion))
+
+    /** 已知 Java 要求（如 jar 内 `version.json` 的 java_version）→ 应使用的内置 JRE 大版本 */
+    fun bundledJavaMajorFor(requiredJava: Int): Int = if (requiredJava >= 25) 25 else 21
 }

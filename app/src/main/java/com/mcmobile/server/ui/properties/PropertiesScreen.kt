@@ -1,5 +1,6 @@
 package com.mcmobile.server.ui.properties
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -10,6 +11,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -19,6 +21,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
@@ -53,12 +56,51 @@ fun PropertiesScreen(vm: AppViewModel, instance: ServerInstance, nav: NavControl
         props = withContext(Dispatchers.IO) { ServerProperties.load(File(dir, "server.properties")) }
     }
 
+    var showUnsaved by remember { mutableStateOf(false) }
+
+    fun saveEdits() {
+        val current = props ?: return
+        val np = ServerProperties.parse(current.toText())
+        edits.forEach { (k, v) -> np[k] = v }
+        File(dir, "server.properties").writeText(np.toText())
+        props = np
+        edits = emptyMap()
+        saved = true
+    }
+
+    fun requestExit() {
+        if (edits.isNotEmpty()) showUnsaved = true else nav.popBackStack()
+    }
+
+    BackHandler(enabled = edits.isNotEmpty()) { showUnsaved = true }
+
+    if (showUnsaved) {
+        AlertDialog(
+            onDismissRequest = { showUnsaved = false },
+            title = { Text("有未保存的修改") },
+            text = { Text("退出将丢弃对 server.properties 的改动，或先保存再离开。") },
+            confirmButton = {
+                TextButton(onClick = {
+                    saveEdits()
+                    showUnsaved = false
+                    nav.popBackStack()
+                }) { Text("保存并退出") }
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    showUnsaved = false
+                    nav.popBackStack()
+                }) { Text("不保存") }
+            },
+        )
+    }
+
     Scaffold(
         topBar = {
             TopAppBar(
                 title = { Text("server.properties") },
                 navigationIcon = {
-                    IconButton(onClick = { nav.popBackStack() }) {
+                    IconButton(onClick = { requestExit() }) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, "返回")
                     }
                 },
@@ -92,6 +134,7 @@ fun PropertiesScreen(vm: AppViewModel, instance: ServerInstance, nav: NavControl
                 )
             }
             LazyColumn(
+                modifier = Modifier.weight(1f),
                 contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
@@ -117,17 +160,10 @@ fun PropertiesScreen(vm: AppViewModel, instance: ServerInstance, nav: NavControl
             }
             Row(Modifier.fillMaxWidth().padding(16.dp)) {
                 Button(
-                    onClick = {
-                        val np = ServerProperties.parse(p.toText())
-                        edits.forEach { (k, v) -> np[k] = v }
-                        File(dir, "server.properties").writeText(np.toText())
-                        props = np
-                        edits = emptyMap()
-                        saved = true
-                    },
+                    onClick = { saveEdits() },
                     enabled = edits.isNotEmpty(),
                     modifier = Modifier.weight(1f),
-                ) { Text(if (saved) "已保存 ✓" else "保存") }
+                ) { Text(if (saved && edits.isEmpty()) "已保存 ✓" else "保存") }
             }
         }
     }

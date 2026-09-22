@@ -205,6 +205,14 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     fun instanceById(id: String) = repo.byId(id)
 
     /**
+     * 更新实例设置（内存等）。只改清单，不动正在运行的服务器：
+     * 新配置在下次启动时由 LaunchSpecBuilder 读清单生效。
+     */
+    fun updateInstance(instance: ServerInstance) {
+        viewModelScope.launch { repo.update(instance) }
+    }
+
+    /**
      * 删除实例。运行中的实例必须先停服：:server 进程持着实例目录作为工作目录，
      * 目录被删掉之后进程还会继续占着 25565 端口跑（"幽灵服务器"），
      * 列表里看不到、日志还在、之后启动任何实例都会被它顶掉。

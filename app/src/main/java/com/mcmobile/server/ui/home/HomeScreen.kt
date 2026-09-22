@@ -20,6 +20,7 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Terminal
@@ -238,6 +239,7 @@ fun HomeScreen(vm: AppViewModel, nav: NavController) {
                             onConsole = { nav.navigate(Routes.CONSOLE) },
                             onProperties = { nav.navigate(Routes.properties(inst.id)) },
                             onFiles = { nav.navigate(Routes.files(inst.id)) },
+                            onInstanceSettings = { nav.navigate(Routes.instance(inst.id)) },
                             onDelete = { pendingDelete = inst },
                         )
                     }
@@ -259,6 +261,7 @@ private fun InstanceCard(
     onConsole: () -> Unit,
     onProperties: () -> Unit,
     onFiles: () -> Unit,
+    onInstanceSettings: () -> Unit,
     onDelete: () -> Unit,
 ) {
     Card(modifier = Modifier.fillMaxWidth()) {
@@ -319,6 +322,10 @@ private fun InstanceCard(
                 }
                 IconButton(onClick = onFiles) {
                     Icon(Icons.Default.Folder, "文件",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                IconButton(onClick = onInstanceSettings) {
+                    Icon(Icons.Default.Memory, "实例设置（内存）",
                         tint = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
                 IconButton(onClick = onProperties) {

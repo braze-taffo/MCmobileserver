@@ -21,9 +21,11 @@ object Routes {
     const val FRP = "frp"
     const val PROPERTIES = "properties/{id}"
     const val FILES = "files/{id}"
+    const val INSTANCE = "instance/{id}"
 
     fun properties(id: String) = "properties/$id"
     fun files(id: String) = "files/$id"
+    fun instance(id: String) = "instance/$id"
 }
 
 @Composable
@@ -71,6 +73,15 @@ fun MCServerApp(vm: AppViewModel = viewModel(), updates: UpdateViewModel = viewM
                 androidx.compose.material3.Text("实例不存在")
             } else {
                 com.mcmobile.server.ui.files.FilesScreen(vm, inst, nav)
+            }
+        }
+        composable(Routes.INSTANCE) { entry ->
+            val id = entry.arguments?.getString("id")
+            val inst = id?.let { vm.instanceById(it) }
+            if (inst == null) {
+                androidx.compose.material3.Text("实例不存在")
+            } else {
+                com.mcmobile.server.ui.instance.InstanceSettingsScreen(vm, inst, nav)
             }
         }
     }

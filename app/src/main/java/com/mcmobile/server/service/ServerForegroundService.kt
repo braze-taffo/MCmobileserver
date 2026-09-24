@@ -20,6 +20,7 @@ import com.mcmobile.server.core.jre.JreStatus
 import com.mcmobile.server.core.launch.JvmLauncher
 import com.mcmobile.server.core.launch.JvmLauncherCallback
 import com.mcmobile.server.core.launch.LaunchSpec
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -84,7 +85,14 @@ class ServerForegroundService : Service() {
 
     enum class RunStatus { IDLE, STARTING, RUNNING, STOPPING, STOPPED, CRASHED, FAILED }
 
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val scope = CoroutineScope(
+        SupervisorJob() + Dispatchers.IO + CoroutineExceptionHandler { _, t ->
+            // 未捕获的协程异常默认会 killProcess 整个 :server，殃及正在存档的 JVM；
+            // 这里降级成报错 + FAILED 状态，进程保持存活
+            android.util.Log.e("mcs-server", "uncaught coroutine failure", t)
+            setStatus(RunStatus.FAILED, error = "内部错误：${t.message ?: t.javaClass.simpleName}")
+        },
+    )
     private val json = Json { encodeDefaults = true }
 
     private var bridge: ConsoleBridgeServer? = null
@@ -112,7 +120,11 @@ class ServerForegroundService : Service() {
                 }
             }
             ACTION_STOP_FORCE -> scope.launch {
-                if (status == RunStatus.RUNNING || status == RunStatus.STARTING) {
+                // STOPPING 必须也算：删除实例的 stopAndWait 优雅停止超时后，状态
+                // 必然已是 STOPPING，漏掉它强杀兜底就永远轮不到
+                if (status == RunStatus.RUNNING || status == RunStatus.STARTING ||
+                    status == RunStatus.STOPPING
+                ) {
                     bridge?.appendLine("[MC服务器] 强制结束进程")
                     shutdownNow(137)
                 }
@@ -141,7 +153,12 @@ class ServerForegroundService : Service() {
             setStatus(status, error = conflict)
             return
         }
-        if (status == RunStatus.RUNNING || status == RunStatus.STARTING) return
+        // STOPPING（存档中，可达十几秒）与终态收尾的 delay 窗口（旧 bridge 仍持有 socket）
+        // 期间到达的启动请求必须丢弃：此时进入 runServer 会在 socket bind 处失败，
+        // 而失败若逃逸成未捕获异常，杀死的是整个 :server 进程
+        if (status == RunStatus.RUNNING || status == RunStatus.STARTING ||
+            status == RunStatus.STOPPING || bridge != null
+        ) return
         spec = s
         startForegroundCompat(buildNotification(s.name))
         scope.launch { runServer(s) }
@@ -159,27 +176,30 @@ class ServerForegroundService : Service() {
         val logsDir = File(s.workDir, "logs").apply { mkdirs() }
         val logFile = File(logsDir, "run-latest.log").apply { delete() }
 
-        val b = ConsoleBridgeServer(
-            socketName = SOCKET_NAME,
-            logFile = logFile,
-            onCommand = { writeStdin(it) },
-            onControl = { control ->
-                when (control) {
-                    "STOP" -> {
-                        setStatus(RunStatus.STOPPING)
-                        writeStdin("stop")
-                    }
-                    "KILL" -> {
-                        bridge?.appendLine("[MC服务器] 强制结束进程")
-                        scope.launch { shutdownNow(137) }
-                    }
-                }
-            },
-        )
-        bridge = b
-        b.start()
-
         try {
+            // 构造即在 abstract namespace bind：终态收尾的 delay 窗口内同名二次 bind 会抛
+            // EADDRINUSE。必须包在 try 里走 FAILED 收尾（handleStart 的守卫拦掉大部分，
+            // 这里兜住漏网时序），否则未捕获异常会杀死整个 :server——包括正在存档的 JVM
+            val b = ConsoleBridgeServer(
+                socketName = SOCKET_NAME,
+                logFile = logFile,
+                onCommand = { writeStdin(it) },
+                onControl = { control ->
+                    when (control) {
+                        "STOP" -> {
+                            setStatus(RunStatus.STOPPING)
+                            writeStdin("stop")
+                        }
+                        "KILL" -> {
+                            bridge?.appendLine("[MC服务器] 强制结束进程")
+                            scope.launch { shutdownNow(137) }
+                        }
+                    }
+                },
+            )
+            bridge = b
+            b.start()
+
             setStatus(RunStatus.STARTING)
             b.appendLine("[MC服务器] 正在准备内嵌 Java 运行时…")
 
@@ -260,11 +280,12 @@ class ServerForegroundService : Service() {
             )
             if (rc != 0) throw IllegalStateException("JVM 启动失败（rc=$rc）")
         } catch (t: Throwable) {
-            b.appendLine("[MC服务器] 启动错误: ${t.message}")
+            // 构造 bridge 失败时 b 不存在，统一走成员引用
+            bridge?.appendLine("[MC服务器] 启动错误: ${t.message}")
             val initLog = File(logsDir, "jvm-init.log")
             if (initLog.isFile()) {
                 runCatching { initLog.readLines().drop(1) }
-                    .getOrNull()?.filter { it.isNotBlank() }?.forEach { b.appendLine(it) }
+                    .getOrNull()?.filter { it.isNotBlank() }?.forEach { bridge?.appendLine(it) }
             }
             setStatus(RunStatus.FAILED, error = t.message)
             delay(1500)

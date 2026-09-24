@@ -128,9 +128,19 @@ fun SettingsScreen(vm: AppViewModel, nav: NavController, updates: UpdateViewMode
                                 style = MaterialTheme.typography.labelMedium,
                             )
                             Spacer(Modifier.height(0.dp))
-                            Button(onClick = {
-                                scope.launch { JreManager.ensureExtracted(context, major) }
-                            }) { Text(if (ready) "重新解压" else "解压") }
+                            Button(
+                                // 解压中禁点：ensureExtracted 虽有互斥，连点仍会排队
+                                // 触发一串无谓的重复解压
+                                enabled = jreState.status != JreStatus.EXTRACTING,
+                                onClick = {
+                                    scope.launch {
+                                        // 「重新解压」必须走 repair：ensureExtracted 对已就绪
+                                        // 目录只补 libjvm，救不了中途损坏的 JRE
+                                        if (ready) JreManager.repair(context, major)
+                                        else JreManager.ensureExtracted(context, major)
+                                    }
+                                },
+                            ) { Text(if (ready) "重新解压" else "解压") }
                         }
                     }
                     if (jreState.status == JreStatus.EXTRACTING) {

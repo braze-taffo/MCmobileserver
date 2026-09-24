@@ -7,7 +7,9 @@ import java.io.File
 
 /**
  * 由实例生成可执行的 LaunchSpec。
- * - Vanilla/Paper/Folia/Fabric：server.jar 的 Manifest Main-Class
+ * - Vanilla/Paper/Folia：server.jar 的 Manifest Main-Class
+ * - Fabric：官方 bundle 启动器 fabric-server-launch.jar（旁边需有原版 server.jar，
+ *   首次启动由启动器自行联网下载 libraries）
  * - Forge/NeoForge：解析 unix_args.txt / user_jvm_args.txt
  */
 object LaunchSpecBuilder {
@@ -28,8 +30,18 @@ object LaunchSpecBuilder {
     private fun buildOrThrow(instance: ServerInstance, dir: File, javaHome: File): LaunchSpec {
         var argfileJvmOpts: List<String> = emptyList()
         val (classpath, mainClass, args) = when (instance.type) {
-            ServerType.VANILLA, ServerType.PAPER, ServerType.FOLIA, ServerType.FABRIC -> {
+            ServerType.VANILLA, ServerType.PAPER, ServerType.FOLIA -> {
                 val jar = findCoreJar(dir)
+                    ?: throw IllegalStateException("实例目录中没有服务器核心 jar（server.jar）")
+                val main = ManifestReader.readMainClass(jar)
+                    ?: throw IllegalStateException("无法读取 ${jar.name} 的 Main-Class")
+                Triple(jar.absolutePath, main, listOf("nogui"))
+            }
+            ServerType.FABRIC -> {
+                // 必须从 fabric-server-launch.jar 进入：走 server.jar 的话加载的是纯原版，
+                // 服务器照常能玩但 mods/ 完全无效（安装时两个 jar 都已备好）
+                val jar = File(dir, "fabric-server-launch.jar").takeIf { it.isFile }
+                    ?: findCoreJar(dir)
                     ?: throw IllegalStateException("实例目录中没有服务器核心 jar（server.jar）")
                 val main = ManifestReader.readMainClass(jar)
                     ?: throw IllegalStateException("无法读取 ${jar.name} 的 Main-Class")

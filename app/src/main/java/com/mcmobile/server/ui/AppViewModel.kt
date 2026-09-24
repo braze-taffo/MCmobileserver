@@ -154,6 +154,9 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     )
 
     fun start(instance: ServerInstance) {
+        // 乐观置位：controller.start 内的探测可达数秒，期间用户删除实例时
+        // wasActive 必须为 true 才会先停服再删，否则可能删出幽灵服务器
+        _activeInstanceId.value = instance.id
         viewModelScope.launch {
             when (val r = controller.start(instance)) {
                 is ServerController.StartResult.Started -> {
@@ -174,17 +177,20 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                         _events.emit(UiEvent.NavigateConsole)
                         return@launch
                     }
-                    _activeInstanceId.value = instance.id
                     if (!instance.installed) _installingId.value = instance.id
                     ConsoleSession.connect()
                     _events.emit(UiEvent.NavigateConsole)
                 }
 
-                is ServerController.StartResult.NeedEula ->
+                is ServerController.StartResult.NeedEula -> {
+                    _activeInstanceId.value = null
                     _events.emit(UiEvent.NeedEula(r.instance))
+                }
 
-                is ServerController.StartResult.Error ->
+                is ServerController.StartResult.Error -> {
+                    _activeInstanceId.value = null
                     _events.emit(UiEvent.Error(r.message))
+                }
             }
         }
     }

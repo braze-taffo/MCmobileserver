@@ -49,6 +49,7 @@ fun PropertiesScreen(vm: AppViewModel, instance: ServerInstance, nav: NavControl
     var props by remember { mutableStateOf<ServerProperties?>(null) }
     var edits by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
     var saved by remember { mutableStateOf(false) }
+    var writeError by remember { mutableStateOf<String?>(null) }
 
     val dir = vm.instanceDirOf(instance)
 
@@ -62,7 +63,14 @@ fun PropertiesScreen(vm: AppViewModel, instance: ServerInstance, nav: NavControl
         val current = props ?: return
         val np = ServerProperties.parse(current.toText())
         edits.forEach { (k, v) -> np[k] = v }
-        File(dir, "server.properties").writeText(np.toText())
+        try {
+            File(dir, "server.properties").writeText(np.toText())
+        } catch (e: Exception) {
+            // 外部存储卷被移走/权限被收回时 writeText 直接抛，不接住的话点保存就崩
+            writeError = "保存失败：${e.message}"
+            return
+        }
+        writeError = null
         props = np
         edits = emptyMap()
         saved = true
@@ -117,9 +125,22 @@ fun PropertiesScreen(vm: AppViewModel, instance: ServerInstance, nav: NavControl
                 )
                 Button(onClick = {
                     val d = ServerProperties.default()
-                    File(dir, "server.properties").writeText(d.toText())
-                    props = d
+                    writeError = try {
+                        File(dir, "server.properties").writeText(d.toText())
+                        props = d
+                        null
+                    } catch (e: Exception) {
+                        "写入失败：${e.message}"
+                    }
                 }, modifier = Modifier.padding(top = 12.dp)) { Text("写入默认配置") }
+                writeError?.let {
+                    Text(
+                        it,
+                        modifier = Modifier.padding(top = 8.dp),
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
             }
             return@Scaffold
         }
@@ -130,6 +151,14 @@ fun PropertiesScreen(vm: AppViewModel, instance: ServerInstance, nav: NavControl
                     "⚠ 服务器运行中，保存的改动将在下次重启后生效",
                     Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
                     color = MaterialTheme.colorScheme.tertiary,
+                    style = MaterialTheme.typography.labelMedium,
+                )
+            }
+            writeError?.let {
+                Text(
+                    it,
+                    Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
+                    color = MaterialTheme.colorScheme.error,
                     style = MaterialTheme.typography.labelMedium,
                 )
             }

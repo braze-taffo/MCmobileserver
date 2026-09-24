@@ -18,13 +18,15 @@ class LaunchSpecBuilderTest {
     @get:Rule
     val tmp = TemporaryFolder()
 
-    private fun serverJar(dir: File, mainClass: String) {
-        JarOutputStream(File(dir, "server.jar").outputStream()).use { jos ->
+    private fun jarWith(dir: File, name: String, mainClass: String) {
+        JarOutputStream(File(dir, name).outputStream()).use { jos ->
             jos.putNextEntry(ZipEntry("META-INF/MANIFEST.MF"))
             jos.write("Manifest-Version: 1.0\r\nMain-Class: $mainClass\r\n\r\n".toByteArray())
             jos.closeEntry()
         }
     }
+
+    private fun serverJar(dir: File, mainClass: String) = jarWith(dir, "server.jar", mainClass)
 
     private fun instance(type: ServerType, mcVersion: String, javaMajor: Int) = ServerInstance(
         id = "test",
@@ -97,5 +99,33 @@ class LaunchSpecBuilderTest {
         val result = LaunchSpecBuilder.build(instance(ServerType.PAPER, "1.21.1", 21), dir, home)
         assertEquals(null, result.spec)
         assertNotNull(result.error)
+    }
+
+    @Test
+    fun fabricLaunchesThroughServerLauncherNotVanilla() {
+        // 安装时 server.jar 与 fabric-server-launch.jar 都在目录里；
+        // 走 server.jar 起来的是纯原版：能玩、不报错，但 mods 完全无效
+        val dir = tmp.newFolder()
+        jarWith(
+            dir, "fabric-server-launch.jar",
+            "net.fabricmc.loader.impl.launch.server.FabricServerLauncher",
+        )
+        serverJar(dir, "net.minecraft.bundler.Main")
+        val home = File(tmp.root, "jre/arm64-v8a/21").apply { mkdirs() }
+        val spec = LaunchSpecBuilder.build(instance(ServerType.FABRIC, "1.21.1", 21), dir, home).spec
+        assertNotNull(spec)
+        assertEquals("net.fabricmc.loader.impl.launch.server.FabricServerLauncher", spec!!.mainClass)
+        assertTrue(spec.classpath.endsWith("fabric-server-launch.jar"))
+    }
+
+    @Test
+    fun fabricFallsBackToServerJarWhenLauncherMissing() {
+        // 老实例/手动导入只有 server.jar 时仍可启动（vanilla 模式），不能直接报错
+        val dir = tmp.newFolder()
+        serverJar(dir, "net.minecraft.bundler.Main")
+        val home = File(tmp.root, "jre/arm64-v8a/21").apply { mkdirs() }
+        val spec = LaunchSpecBuilder.build(instance(ServerType.FABRIC, "1.21.1", 21), dir, home).spec
+        assertNotNull(spec)
+        assertEquals("net.minecraft.bundler.Main", spec!!.mainClass)
     }
 }

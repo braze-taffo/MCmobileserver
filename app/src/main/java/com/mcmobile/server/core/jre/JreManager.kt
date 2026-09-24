@@ -8,6 +8,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.File
 
@@ -49,6 +51,9 @@ object JreManager {
     private val _state = MutableStateFlow(JreState())
     val state: StateFlow<JreState> = _state.asStateFlow()
 
+    /** 同进程串行化解压：设置页连点/重入时不允许两个解压任务互相清场 */
+    private val mutex = Mutex()
+
     fun supportedAbi(): String? {
         val primary = Build.SUPPORTED_ABIS.firstOrNull() ?: return null
         return when {
@@ -80,24 +85,35 @@ object JreManager {
         val abi = supportedAbi() ?: throw IllegalStateException("不支持的设备架构")
         val entryName = "lib/$abi/libjvm$javaMajor.so"
         dest.parentFile?.mkdirs()
+        // 先写临时文件再换名：直写 dest 的话拷贝中途被杀会留下"非空但残缺"的假完成文件，
+        // 之后所有启动都会 dlopen 失败且 isReady 仍显示就绪
+        val tmp = File(dest.parentFile, "libjvm.so.tmp-${android.os.Process.myPid()}")
         java.util.zip.ZipFile(File(context.applicationInfo.sourceDir)).use { zf ->
             val entry = zf.getEntry(entryName)
                 ?: throw IllegalStateException("APK 内缺少原生库 $entryName")
             zf.getInputStream(entry).use { input ->
-                dest.outputStream().use { input.copyTo(it) }
+                tmp.outputStream().use { input.copyTo(it) }
             }
         }
-        setPerms(dest, executable = true)
+        setPerms(tmp, executable = true)
+        dest.delete()
+        if (!tmp.renameTo(dest)) {
+            tmp.delete()
+            throw IllegalStateException("libjvm 落盘失败: ${dest.absolutePath}")
+        }
         return dest
     }
 
     /** 幂等：已解压则直接返回；否则后台解压并更新 [state]。 */
     suspend fun ensureExtracted(context: Context, javaMajor: Int = 21) = withContext(Dispatchers.IO) {
-        val appContext = context.applicationContext
+        mutex.withLock { ensureExtractedLocked(context.applicationContext, javaMajor) }
+    }
+
+    private suspend fun ensureExtractedLocked(appContext: Context, javaMajor: Int) {
         val abi = supportedAbi()
         if (abi == null) {
             _state.update { it.copy(status = JreStatus.FAILED, error = "不支持的设备架构（需要 arm64 或 x86_64）") }
-            return@withContext
+            return
         }
         val home = javaHomeDir(appContext, javaMajor)
         val extracted = File(home, "lib/modules").exists() && File(home, ".mcs-extracted").exists()
@@ -114,19 +130,25 @@ object JreManager {
             } catch (t: Throwable) {
                 _state.update { it.copy(status = JreStatus.FAILED, error = t.message ?: t.toString()) }
             }
-            return@withContext
+            return
         }
 
         _state.update {
             it.copy(status = JreStatus.EXTRACTING, abi = abi, javaHome = home, javaMajor = javaMajor, progress = 0f)
         }
+        // UI 进程与 :server 进程可能同时解压同一套 JRE（跨进程 mutex 管不到）：
+        // 全程写进本进程独有的 staging 目录，全部就绪后一次性切换成 home。
+        // 无论哪一方被杀/失败，home 要么是旧内容要么是某一方完整切换的结果，
+        // 绝不会出现"带 .mcs-extracted 标记的残缺目录"。
+        val staging = File(home.parentFile, "staging-$javaMajor-${android.os.Process.myPid()}")
         try {
-            home.deleteRecursively()
+            staging.deleteRecursively()
             home.parentFile?.mkdirs()
 
             // assets 流直接接 ZipInputStream 在部分设备上会解出 0 字节小文件，
             // 先原样拷成临时文件再用 ZipFile 按条目读，稳定且能取真实总数算进度。
-            val tmpZip = File(appContext.cacheDir, "jre-$abi-$javaMajor.zip")
+            // 文件名带 pid：并发解压时不会互相截断对方的临时 zip
+            val tmpZip = File(appContext.cacheDir, "jre-$abi-$javaMajor-${android.os.Process.myPid()}.zip")
             appContext.assets.open("jre/$abi/$javaMajor.zip").use { input ->
                 tmpZip.outputStream().use { input.copyTo(it) }
             }
@@ -134,11 +156,11 @@ object JreManager {
                 val entries = zf.entries().toList()
                 var count = 0
                 for (entry in entries) {
-                    val out = File(home, entry.name)
+                    val out = File(staging, entry.name)
                     if (entry.isDirectory) {
                         out.mkdirs()
                     } else {
-                        out.parentFile.mkdirs()
+                        out.parentFile?.mkdirs()
                         zf.getInputStream(entry).use { input ->
                             out.outputStream().use { input.copyTo(it) }
                         }
@@ -153,8 +175,15 @@ object JreManager {
                 }
             }
             tmpZip.delete()
+            // 标记先写进 staging 再切换：renameTo 成功的瞬间，home 一定携带完整内容
+            File(staging, ".mcs-extracted").writeText("abi=$abi java=$javaMajor")
+            home.deleteRecursively()
+            if (!staging.renameTo(home)) {
+                // 并发方刚把完整的 home 切换上来的情形：让位，自己重走快速路径即可
+                throw IllegalStateException("JRE 目录切换失败：${staging.absolutePath}")
+            }
+            // libjvm 在切换后补齐：此处即使被杀，home 也完整，下次启动走上面的快速路径自愈
             materializeLibjvm(appContext, javaMajor)
-            File(home, ".mcs-extracted").writeText("abi=$abi java=$javaMajor")
             _state.update {
                 it.copy(
                     status = JreStatus.READY, progress = 1f, javaMajor = javaMajor,
@@ -162,7 +191,8 @@ object JreManager {
                 )
             }
         } catch (t: Throwable) {
-            home.deleteRecursively()
+            // 只清自己的 staging。home 可能是并发方刚切换好的完整目录，绝不能删
+            staging.deleteRecursively()
             _state.update { it.copy(status = JreStatus.FAILED, error = t.message ?: t.toString()) }
         }
     }
@@ -181,9 +211,11 @@ object JreManager {
             ?.substringAfter('"')?.substringBefore('"')
     }.getOrNull()
 
-    /** 修复入口：删除后重新解压 */
-    suspend fun repair(context: Context, javaMajor: Int = 21) {
-        javaHomeDir(context, javaMajor).deleteRecursively()
-        ensureExtracted(context, javaMajor)
+    /** 修复入口：删除后重新解压（设置页「重新解压」走这里；ensureExtracted 对已就绪目录只补 libjvm） */
+    suspend fun repair(context: Context, javaMajor: Int = 21) = withContext(Dispatchers.IO) {
+        mutex.withLock {
+            javaHomeDir(context.applicationContext, javaMajor).deleteRecursively()
+            ensureExtractedLocked(context.applicationContext, javaMajor)
+        }
     }
 }

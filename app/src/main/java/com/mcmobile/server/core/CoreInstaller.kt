@@ -10,6 +10,7 @@ import com.mcmobile.server.data.StorageKind
 import com.mcmobile.server.data.api.CoreApi
 import com.mcmobile.server.service.ServerForegroundService
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -264,8 +265,17 @@ class ServerController(private val context: Context, private val repo: InstanceR
      * @return true 表示确认已停（或本来就没在跑）；false 表示超时仍在跑
      */
     suspend fun stopAndWait(gracefulMs: Long = 12_000, forceMs: Long = 8_000): Boolean {
+        // 连不上 ≠ 没在跑：:server 冷启动到 socket bind 有数秒窗口（UI 重启后、
+        // 或刚点启动还没起完）。短轮询盖住这个窗口再下结论；进程真不在时
+        // abstract socket 立即拒连，正常删除最多多等约 2 秒。
         if (!ConsoleSession.isConnected()) ConsoleSession.connect(attempts = 4)
-        // 连不上 :server 进程 = 本来就没有服务器在跑
+        if (!ConsoleSession.isConnected()) {
+            for (i in 1..4) {
+                delay(500)
+                ConsoleSession.connect(attempts = 1)
+                if (ConsoleSession.isConnected()) break
+            }
+        }
         if (!ConsoleSession.isConnected()) return true
         stop(force = false)
         if (awaitExit(gracefulMs)) return true

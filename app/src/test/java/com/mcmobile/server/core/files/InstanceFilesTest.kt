@@ -99,4 +99,93 @@ class InstanceFilesTest {
         assertThrows(java.io.IOException::class.java) { InstanceFiles(root).importFile(root, "mod.jar", broken) }
         assertTrue(root.listFiles()!!.isEmpty())
     }
+
+    @Test fun importsWorldZipFromTopLevelFolderAndIgnoresSiblings() {
+        val root = tmp.newFolder()
+        val zip = archive(
+            "MyWorld/level.dat" to "ld",
+            "MyWorld/region/r.0.0.mca" to "region",
+            // 旧版存档的深层 level.dat 只是下界标记，不能让它干扰存档根的定位
+            "MyWorld/DIM1/level.dat" to "nether",
+            "readme.txt" to "ignore",
+            "__MACOSX/junk" to "junk",
+            "MyWorld/._region" to "junk",
+        )
+        assertEquals("MyWorld", InstanceFiles(root).importWorldZip(zip, "fallback"))
+        assertEquals("ld", File(root, "MyWorld/level.dat").readText())
+        assertEquals("region", File(root, "MyWorld/region/r.0.0.mca").readText())
+        assertEquals("nether", File(root, "MyWorld/DIM1/level.dat").readText())
+        assertFalse(File(root, "readme.txt").exists())
+        assertFalse(File(root, "MyWorld/._region").exists())
+        assertTrue(root.listFiles()!!.none { it.name.startsWith(".world-import-") })
+    }
+
+    @Test fun importsBareWorldZipUsingFallbackName() {
+        val root = tmp.newFolder()
+        val zip = archive("level.dat" to "ld", "region/r.0.0.mca" to "r", "playerdata/x.dat" to "p")
+        assertEquals("我的存档", InstanceFiles(root).importWorldZip(zip, "我的存档"))
+        assertEquals("ld", File(root, "我的存档/level.dat").readText())
+        assertEquals("p", File(root, "我的存档/playerdata/x.dat").readText())
+    }
+
+    @Test fun wrapperDirectoriesAroundWorldAreStripped() {
+        val root = tmp.newFolder()
+        val zip = archive("ExtractMe/Save/level.dat" to "ld", "ExtractMe/Save/region/r.mca" to "r", "ExtractMe/readme.txt" to "x")
+        assertEquals("Save", InstanceFiles(root).importWorldZip(zip, "fallback"))
+        assertTrue(File(root, "Save/level.dat").isFile)
+        assertFalse(File(root, "ExtractMe").exists())
+    }
+
+    @Test fun duplicateLevelDatEntriesDoNotLookAmbiguous() {
+        val root = tmp.newFolder()
+        // ZipOutputStream 拒绝完全同名条目，用 ./level.dat 构造“归一化后路径相同”的重复
+        val zip = archive("level.dat" to "first", "./level.dat" to "second", "region/r.mca" to "r")
+        assertEquals("w", InstanceFiles(root).importWorldZip(zip, "w"))
+        assertEquals("second", File(root, "w/level.dat").readText())
+    }
+
+    @Test fun rejectsAmbiguousOrMissingWorldAndLeavesNothingBehind() {
+        val root = tmp.newFolder()
+        assertThrows(IllegalArgumentException::class.java) {
+            InstanceFiles(root).importWorldZip(archive("a/level.dat" to "1", "b/level.dat" to "2"), "f")
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            InstanceFiles(root).importWorldZip(archive("level.dat" to "1", "w/level.dat" to "2"), "f")
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            InstanceFiles(root).importWorldZip(archive("mods/x.jar" to "j"), "f")
+        }
+        assertTrue(root.listFiles()!!.isEmpty())
+    }
+
+    @Test fun unsafeOrOversizedWorldZipLeavesNothingBehind() {
+        val root = tmp.newFolder()
+        assertThrows(IllegalArgumentException::class.java) {
+            InstanceFiles(root).importWorldZip(archive("good/level.dat" to "g", "../evil" to "e"), "f")
+        }
+        assertFalse(File(root, "good").exists())
+        assertThrows(IllegalArgumentException::class.java) {
+            InstanceFiles(root).importWorldZip(archive("w/level.dat" to "toolarge"), "f", 2)
+        }
+        assertTrue(root.listFiles()!!.isEmpty())
+    }
+
+    @Test fun refusesToOverwriteExistingWorldFolder() {
+        val root = tmp.newFolder()
+        File(root, "MyWorld/region").mkdirs()
+        File(root, "MyWorld/region/old.mca").writeText("old")
+        assertThrows(IllegalArgumentException::class.java) {
+            InstanceFiles(root).importWorldZip(archive("MyWorld/level.dat" to "new"), "f")
+        }
+        assertEquals("old", File(root, "MyWorld/region/old.mca").readText())
+        assertFalse(File(root, "MyWorld/level.dat").exists())
+    }
+
+    @Test fun invalidFallbackWorldNameRejected() {
+        val root = tmp.newFolder()
+        assertThrows(IllegalArgumentException::class.java) {
+            InstanceFiles(root).importWorldZip(archive("level.dat" to "d"), "../bad")
+        }
+        assertTrue(root.listFiles()!!.isEmpty())
+    }
 }

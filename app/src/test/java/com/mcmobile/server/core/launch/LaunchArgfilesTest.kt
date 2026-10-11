@@ -6,11 +6,75 @@ import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
+import java.util.jar.Attributes
+import java.util.jar.JarOutputStream
+import java.util.jar.Manifest
 
 class LaunchArgfilesTest {
+    @Test fun renderingPreservesSpacesQuotesAndWindowsPaths() {
+        val values = listOf("-Dname=hello world", "say \"hello\"", "C:\\my folder\\path", "")
+        assertEquals(values, LaunchArgfiles.tokenize(LaunchArgfiles.renderTokens(values, "\n")))
+    }
+
+    @Test fun incompleteQuotedArgumentsAreRejected() {
+        org.junit.Assert.assertThrows(IllegalArgumentException::class.java) { LaunchArgfiles.tokenize("\"unfinished") }
+    }
 
     @get:Rule
     val tmp = TemporaryFolder()
+
+    private fun shim(dir: File, path: String, classPath: String? = null): File {
+        val manifest = Manifest().apply {
+            mainAttributes[Attributes.Name.MANIFEST_VERSION] = "1.0"
+            mainAttributes[Attributes.Name.MAIN_CLASS] = "net.minecraftforge.bootstrap.shim.Main"
+            if (classPath != null) mainAttributes[Attributes.Name.CLASS_PATH] = classPath
+        }
+        return File(dir, path).also { jar ->
+            jar.parentFile.mkdirs()
+            JarOutputStream(jar.outputStream(), manifest).use { }
+        }
+    }
+
+    @Test fun forgeShimJarResolvesMainClassAndPreservesJvmAndProgramArguments() {
+        val dir = tmp.newFolder("forge-shim")
+        val jar = shim(dir, "forge-1.21.11-61.2.0-shim.jar", "libraries/bootstrap.jar libraries/asm.jar")
+        val argfile = File(dir, "unix_args.txt").apply {
+            // Verified against the official Forge 1.21.11-61.2.0 installer.
+            writeText("-Djava.net.preferIPv6Addresses=system -jar ${jar.name}\n--safeMode")
+        }
+        val parsed = LaunchArgfiles.parse(dir, argfile)
+        assertEquals("net.minecraftforge.bootstrap.shim.Main", parsed.mainClass)
+        assertEquals(listOf(jar.name, "libraries/bootstrap.jar", "libraries/asm.jar"), parsed.classpathEntries)
+        assertEquals(listOf("-Djava.net.preferIPv6Addresses=system"), parsed.unixJvmArgs)
+        assertEquals(listOf("--safeMode"), parsed.programArgs)
+    }
+
+    @Test fun quotedJarPathUsesManifestDependenciesRelativeToJarAndOverridesEarlierClasspath() {
+        val dir = tmp.newFolder("jar-space")
+        shim(dir, "core files/shim.jar", "../libraries/bootstrap.jar")
+        val argfile = File(dir, "unix_args.txt").apply { writeText("-cp ignored.jar -jar \"core files/shim.jar\" nogui") }
+        val parsed = LaunchArgfiles.parse(dir, argfile)
+        assertEquals(listOf("core files/shim.jar", "libraries/bootstrap.jar"), parsed.classpathEntries)
+        assertEquals(listOf("nogui"), parsed.programArgs)
+        assertTrue(parsed.unixJvmArgs.isEmpty())
+    }
+
+    @Test fun jarLaunchRejectsMissingOperandAndMissingManifestMainClass() {
+        val dir = tmp.newFolder("bad-jar")
+        val argfile = File(dir, "unix_args.txt").apply { writeText("-jar") }
+        org.junit.Assert.assertThrows(IllegalStateException::class.java) { LaunchArgfiles.parse(dir, argfile) }
+        val manifest = Manifest().apply { mainAttributes[Attributes.Name.MANIFEST_VERSION] = "1.0" }
+        JarOutputStream(File(dir, "no-main.jar").outputStream(), manifest).use { }
+        argfile.writeText("-jar no-main.jar")
+        org.junit.Assert.assertThrows(IllegalStateException::class.java) { LaunchArgfiles.parse(dir, argfile) }
+    }
+
+    @Test fun shimManifestDependencyCannotEscapeInstanceDirectory() {
+        val dir = tmp.newFolder("bad-dependency")
+        shim(dir, "shim.jar", "../outside.jar")
+        val argfile = File(dir, "unix_args.txt").apply { writeText("-jar shim.jar") }
+        org.junit.Assert.assertThrows(IllegalArgumentException::class.java) { LaunchArgfiles.parse(dir, argfile) }
+    }
 
     @Test
     fun tokenize_handlesQuotesAndWhitespace() {

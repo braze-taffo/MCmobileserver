@@ -53,7 +53,7 @@ class ServerForegroundService : Service() {
         const val ACTION_STOP_GRACEFUL = "com.mcmobile.server.action.STOP_GRACEFUL"
         const val ACTION_STOP_FORCE = "com.mcmobile.server.action.STOP_FORCE"
         const val EXTRA_SPEC_JSON = "spec"
-        const val SOCKET_NAME = "mcs.console"
+        val SOCKET_NAME: String get() = com.mcmobile.server.core.console.ConsoleSocketIdentity.name
         private const val CHANNEL_ID = "mcs_running"
         private const val NOTIF_ID = 1001
 
@@ -81,6 +81,10 @@ class ServerForegroundService : Service() {
         val instanceId: String? = null,
         val exitCode: Int? = null,
         val error: String? = null,
+        val pid: Int? = null,
+        val memoryKb: Long? = null,
+        val cpuPercent: Double? = null,
+        val uptimeMs: Long? = null,
     )
 
     enum class RunStatus { IDLE, STARTING, RUNNING, STOPPING, STOPPED, CRASHED, FAILED }
@@ -99,6 +103,10 @@ class ServerForegroundService : Service() {
     private var stdinWriter: OutputStream? = null
     private var logPump: Job? = null
     private var spec: LaunchSpec? = null
+    private var startedAt = android.os.SystemClock.elapsedRealtime()
+    private var lastCpu = android.os.Process.getElapsedCpuTime()
+    private var lastSample = startedAt
+    private var sampleCpu: Double? = null
 
     @Volatile
     private var status: RunStatus = RunStatus.IDLE
@@ -199,14 +207,36 @@ class ServerForegroundService : Service() {
             )
             bridge = b
             b.start()
+            startedAt = android.os.SystemClock.elapsedRealtime()
+            scope.launch {
+                while (true) {
+                    delay(5000)
+                    val now = android.os.SystemClock.elapsedRealtime()
+                    val cpu = android.os.Process.getElapsedCpuTime()
+                    sampleCpu = (cpu - lastCpu) * 100.0 / (now - lastSample).coerceAtLeast(1)
+                    lastCpu = cpu; lastSample = now
+                    setStatus(status)
+                }
+            }
 
             setStatus(RunStatus.STARTING)
             b.appendLine("[MC服务器] 正在准备内嵌 Java 运行时…")
 
-            JreManager.ensureExtracted(this@ServerForegroundService, s.javaMajor)
+            val runtimeProgress = scope.launch {
+                var lastReport = 0L
+                JreManager.state.collect { preparing ->
+                    val now = android.os.SystemClock.elapsedRealtime()
+                    if (preparing.status == JreStatus.EXTRACTING && now - lastReport >= 1000) {
+                        b.appendLine("[Java ${s.javaMajor}] ${(preparing.progress * 100).toInt()}% ${preparing.javaVersion ?: "正在解压运行时"}")
+                        lastReport = now
+                    }
+                }
+            }
+            try { JreManager.ensureExtracted(this@ServerForegroundService, s.javaMajor) }
+            finally { runtimeProgress.cancel() }
             val jre = JreManager.state.value
             if (jre.status != JreStatus.READY) {
-                throw IllegalStateException("JRE 准备失败: ${jre.error}")
+                throw IllegalStateException("JRE 准备失败: ${jre.error ?: "状态为 ${jre.status}"}", jre.failureCause)
             }
             b.appendLine("[MC服务器] Java ${jre.javaVersion} 就绪（${jre.abi}），启动 ${s.mainClass}")
 
@@ -243,7 +273,7 @@ class ServerForegroundService : Service() {
                 ?: JreManager.materializeLibjvm(this@ServerForegroundService, s.javaMajor).absolutePath
             // sun.boot.library.path 由 VM 自行推导，而这个 JRE 里的 libjvm 在 APK 内，
             // 推导结果不可靠，直接把 JRE 的库目录显式告知 VM 与 System.loadLibrary
-            val jreLibDir = File(s.javaHome, "lib").absolutePath
+            val jreLibDir = JreManager.libraryDir(File(s.javaHome)).absolutePath
             val opts = buildList {
                 add("-Djava.home=${s.javaHome}")
                 add("-Djava.class.path=${s.classpath}")
@@ -261,7 +291,7 @@ class ServerForegroundService : Service() {
                 add("-Dstderr.encoding=UTF-8")
                 add("-Djava.awt.headless=true")
                 add("-Dlog4j2.formatMsgNoLookups=true")
-                if (applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE != 0) {
+                if (s.javaMajor >= 9 && applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE != 0) {
                     // init 阶段日志随 fd1 一起落到 logs/jvm-init.log，便于定位 VM 初始化失败
                     add("-Xlog:init,os=info")
                 }
@@ -282,6 +312,9 @@ class ServerForegroundService : Service() {
         } catch (t: Throwable) {
             // 构造 bridge 失败时 b 不存在，统一走成员引用
             bridge?.appendLine("[MC服务器] 启动错误: ${t.message}")
+            android.util.Log.e("mcs-server", "Server startup failed (Java ${s.javaMajor})", t)
+            // Console copy/export and run-latest.log must retain the original failure chain.
+            t.stackTraceToString().lineSequence().forEach { bridge?.appendLine("[启动诊断] $it") }
             val initLog = File(logsDir, "jvm-init.log")
             if (initLog.isFile()) {
                 runCatching { initLog.readLines().drop(1) }
@@ -330,6 +363,8 @@ class ServerForegroundService : Service() {
                     instanceId = spec?.instanceId,
                     exitCode = exit,
                     error = error,
+                    pid = android.os.Process.myPid(), memoryKb = android.os.Debug.getPss(),
+                    cpuPercent = sampleCpu, uptimeMs = android.os.SystemClock.elapsedRealtime() - startedAt,
                 ),
             ),
         )

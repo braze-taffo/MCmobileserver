@@ -39,3 +39,8 @@ build-frp.log
 # OS
 .DS_Store
 Thumbs.db
+
+# Local references, chat uploads and signed delivery archives
+/.codex-remote-attachments/
+/PCL2/
+/release-out/

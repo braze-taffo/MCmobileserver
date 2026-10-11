@@ -51,10 +51,10 @@ object LaunchArgfiles {
             .maxByOrNull { it.length() }
     }
 
-    fun parse(instanceDir: File): Parsed {
-        val unixArgsFile = findUnixArgsFile(instanceDir)
+    fun parse(instanceDir: File, selectedFile: File? = null): Parsed {
+        val unixArgsFile = selectedFile ?: findUnixArgsFile(instanceDir)
             ?: throw IllegalStateException("未找到 unix_args.txt（服务器尚未安装？）")
-        val tokens = tokenize(unixArgsFile.readText())
+        val tokens = tokenize(unixArgsFile.readLines().filterNot { it.trimStart().startsWith("#") }.joinToString("\n"))
 
         val cp = mutableListOf<String>()
         val jvmArgs = mutableListOf<String>()
@@ -84,11 +84,11 @@ object LaunchArgfiles {
             when {
                 classpath != null -> {
                     // unix_args.txt 由 run.sh（Linux 语义）生成，分隔符恒为 ':'
-                    cp += classpath.first.split(':')
+                    cp += classpath.first.split(if (';' in classpath.first) ';' else ':').map { it.replace('\\', '/') }
                     i += classpath.second
                 }
                 modulePath != null -> {
-                    val entries = modulePath.first.split(':')
+                    val entries = modulePath.first.split(if (';' in modulePath.first) ';' else ':').map { it.replace('\\', '/') }
                     // FindClass 只能走 classpath，模块路径的 jar 必须同时在 classpath 上
                     cp += entries
                     jvmArgs += "--module-path=" + entries.joinToString(":") {
@@ -105,6 +105,25 @@ object LaunchArgfiles {
                         jvmArgs += "$name=$head=ALL-UNNAMED"
                     }
                     i += n
+                }
+                t == "-jar" -> {
+                    // Modern Forge argfiles launch a shim JAR. -jar belongs to the Java
+                    // launcher, not JNI_CreateJavaVM: resolve its manifest entry point.
+                    val path = tokens.getOrNull(i + 1)?.takeIf { it.isNotBlank() }
+                        ?: throw IllegalStateException("unix_args.txt 的 -jar 缺少 JAR 路径")
+                    val files = com.mcmobile.server.core.files.ManagedFiles(instanceDir)
+                    val jar = files.checked(File(instanceDir, path.replace('\\', '/')))
+                    check(jar.isFile) { "缺少启动 JAR：$path" }
+                    mainClass = ManifestReader.readMainClass(jar)?.takeIf { it.isNotBlank() }
+                        ?: throw IllegalStateException("无法读取 ${jar.name} 的 Main-Class")
+                    // java -jar ignores an earlier -cp; manifest Class-Path is relative
+                    // to the JAR location, while argfile operands are relative to cwd.
+                    cp.clear()
+                    cp += jar.relativeTo(instanceDir).invariantSeparatorsPath
+                    cp += ManifestReader.readClassPath(jar).map { dependency ->
+                        files.checked(File(jar.parentFile, dependency)).relativeTo(instanceDir).invariantSeparatorsPath
+                    }
+                    i += 2
                 }
                 t == "-m" || t == "--module" -> {
                     // `--module mod/Class` 形态：模块 jar 已在 classpath 上，主类取 Class 部分
@@ -148,10 +167,14 @@ object LaunchArgfiles {
         val sb = StringBuilder()
         var quote: Char? = null
         var hasToken = false
-        for (c in text) {
+        var cursor = 0
+        while (cursor < text.length) {
+            val c = text[cursor++]
             when {
                 quote != null -> {
-                    if (c == quote) quote = null else sb.append(c)
+                    if (c == quote) quote = null
+                    else if (c == '\\' && cursor < text.length && (text[cursor] == quote || text[cursor] == '\\')) sb.append(text[cursor++])
+                    else sb.append(c)
                 }
                 c == '"' || c == '\'' -> {
                     quote = c
@@ -170,7 +193,13 @@ object LaunchArgfiles {
                 }
             }
         }
+        require(quote == null) { "启动参数包含未闭合的引号" }
         if (hasToken) out += sb.toString()
         return out
+    }
+
+    internal fun renderTokens(tokens: List<String>, separator: String = " "): String = tokens.joinToString(separator) { token ->
+        if (token.isNotEmpty() && token.none { it.isWhitespace() || it == '\'' || it == '"' }) token
+        else "\"" + token.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
     }
 }

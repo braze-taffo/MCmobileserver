@@ -3,6 +3,7 @@
     xmlns:tools="http://schemas.android.com/tools">
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
@@ -26,9 +27,15 @@
         android:theme="@style/Theme.MCMobileServer"
         android:allowBackup="false"
         android:supportsRtl="true">
+        <provider android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.apkfiles" android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data android:name="android.support.FILE_PROVIDER_PATHS" android:resource="@xml/apk_paths" />
+        </provider>
+
 
         <activity
-            android:name=".MainActivity"
+            android:name="com.mcmobile.server.MainActivity"
             android:exported="true"
             android:launchMode="singleTop"
             android:configChanges="orientation|screenSize|keyboardHidden|uiMode">
@@ -39,8 +46,11 @@
         </activity>
 
         <!-- JVM 在独立进程中运行，崩溃与 UI 进程互相隔离 -->
+        <service android:name="com.mcmobile.server.service.ManagementService" android:exported="false" android:foregroundServiceType="specialUse">
+            <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE" android:value="Maintains user-configured backup, restart and command tasks while a Minecraft server is running" />
+        </service>
         <service
-            android:name=".service.FrpService"
+            android:name="com.mcmobile.server.service.FrpService"
             android:exported="false"
             android:foregroundServiceType="specialUse">
             <property
@@ -48,7 +58,7 @@
                 android:value="Maintains a user-started FRP TCP tunnel for a Minecraft server" />
         </service>
         <service
-            android:name=".service.ServerForegroundService"
+            android:name="com.mcmobile.server.service.ServerForegroundService"
             android:process=":server"
             android:exported="false"
             android:foregroundServiceType="specialUse">

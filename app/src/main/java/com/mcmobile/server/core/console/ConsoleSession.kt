@@ -2,16 +2,13 @@ package com.mcmobile.server.core.console
 
 import android.net.LocalSocket
 import android.net.LocalSocketAddress
-import com.mcmobile.server.service.ServerForegroundService
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -40,6 +37,10 @@ object ConsoleSession {
         val instanceId: String? = null,
         val exitCode: Int? = null,
         val error: String? = null,
+        val pid: Int? = null,
+        val memoryKb: Long? = null,
+        val cpuPercent: Double? = null,
+        val uptimeMs: Long? = null,
     )
 
     /** :server 进程当前正在跑的实例 */
@@ -48,14 +49,15 @@ object ConsoleSession {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
 
-    private val _lines = MutableSharedFlow<String>(extraBufferCapacity = 8192)
-    val lines: SharedFlow<String> = _lines.asSharedFlow()
+    private val logEvents = ConsoleLogEvents()
+    val lines: SharedFlow<String> = logEvents.lines
 
     private val _state = MutableStateFlow(UiState())
     val state: StateFlow<UiState> = _state.asStateFlow()
 
-    private var socket: LocalSocket? = null
-    private var writer: java.io.OutputStream? = null
+    private data class Connection(val socket: LocalSocket, val writer: java.io.OutputStream)
+    @Volatile private var connection: Connection? = null
+    private val connectionLock = Any()
     private val connectMutex = Mutex()
 
     /** 尝试连接（:server 进程可能还在启动），最多等 ~8s */
@@ -65,20 +67,23 @@ object ConsoleSession {
             if (isConnected()) return@withLock
             var lastError: Exception? = null
             repeat(attempts) {
+                val s = LocalSocket()
                 try {
-                    val s = LocalSocket()
                     s.connect(
                         LocalSocketAddress(
-                            ServerForegroundService.SOCKET_NAME,
+                            ConsoleSocketIdentity.name,
                             LocalSocketAddress.Namespace.ABSTRACT,
                         ),
                     )
-                    socket = s
-                    writer = s.outputStream
-                    _state.value = UiState(status = "CONNECTED")
-                    scope.launch { readLoop(s) }
+                    val current = Connection(s, s.outputStream)
+                    synchronized(connectionLock) {
+                        connection = current
+                        _state.value = UiState(status = "CONNECTED")
+                    }
+                    scope.launch { readLoop(current) }
                     return@withLock
                 } catch (e: Exception) {
+                    runCatching { s.close() }
                     lastError = e
                     delay(300)
                 }
@@ -92,7 +97,7 @@ object ConsoleSession {
      * 不支持的方法，一调用就抛 UnsupportedOperationException，会把 UI 进程直接带崩
      * （真机复现：删掉实例后启动下一个实例，必崩）。socket 失效由 [readLoop] 退出时置 null 体现。
      */
-    fun isConnected(): Boolean = socket?.isConnected == true
+    fun isConnected(): Boolean = connection?.socket?.isConnected == true
 
     /**
      * 连上 :server 进程并问清楚它现在在跑哪个实例。
@@ -104,7 +109,7 @@ object ConsoleSession {
     suspend fun activeServer(attempts: Int = 8, timeoutMs: Long = 1500): Active? {
         if (!isConnected()) connect(attempts)
         if (!isConnected()) return null
-        // 连上后本进程会先收到历史日志、再收到状态帧；等不到就用当前值兜底
+        // 状态优先发送，历史回放用 H 帧，不参与新命令的确认。
         val st = withTimeoutOrNull(timeoutMs) {
             state.first { it.serverStatus != null || it.status == "EXITED" }
         } ?: state.value
@@ -113,13 +118,16 @@ object ConsoleSession {
         return Active(st.instanceId, st.name, serverStatus)
     }
 
-    private suspend fun readLoop(s: LocalSocket) {
+    private suspend fun readLoop(current: Connection) {
+        val s = current.socket
         try {
             BufferedReader(InputStreamReader(s.inputStream, Charsets.UTF_8)).useLines { seq ->
                 for (raw in seq) {
+                    if (connection !== current) break
                     val line = raw.trimEnd()
                     when {
-                        line.startsWith("L\t") -> _lines.emit(line.substring(2))
+                        line.startsWith("L\t") -> logEvents.publish(line.substring(2), live = true, connection = current)
+                        line.startsWith("H\t") -> logEvents.publish(line.substring(2), live = false, connection = current)
                         line.startsWith("S\t") -> runCatching {
                             val msg = json.decodeFromString<ServerState>(line.substring(2))
                             _state.value = UiState(
@@ -129,6 +137,7 @@ object ConsoleSession {
                                 instanceId = msg.instanceId,
                                 exitCode = msg.exitCode,
                                 error = msg.error,
+                                pid = msg.pid, memoryKb = msg.memoryKb, cpuPercent = msg.cpuPercent, uptimeMs = msg.uptimeMs,
                             )
                         }
                     }
@@ -137,22 +146,38 @@ object ConsoleSession {
         } catch (_: Exception) {
         }
         // 对端关闭：若从未收到终态状态，推断进程已退出（服务器 System.exit 路径）
-        val prev = _state.value
-        val inferred = prev.serverStatus in setOf("STOPPING", "RUNNING", "STARTING")
-        _state.value = UiState(
-            status = "EXITED",
-            serverStatus = if (inferred || prev.serverStatus == null) "STOPPED" else prev.serverStatus,
-            name = prev.name,
-            instanceId = prev.instanceId,
-            exitCode = prev.exitCode,
-            error = prev.error,
-        )
-        socket = null
-        writer = null
+        synchronized(connectionLock) {
+            if (connection === current) {
+                connection = null
+                val prev = _state.value
+                val inferred = prev.serverStatus in setOf("STOPPING", "RUNNING", "STARTING")
+                _state.value = UiState(
+                    status = "EXITED",
+                    serverStatus = if (inferred || prev.serverStatus == null) "STOPPED" else prev.serverStatus,
+                    name = prev.name, instanceId = prev.instanceId,
+                    exitCode = prev.exitCode, error = prev.error,
+                )
+            }
+            logEvents.disconnected(current)
+        }
+        runCatching { s.close() }
     }
 
-    fun sendCommand(command: String) {
-        send("C\t$command")
+    /** Register before sending; rendering backpressure and replay cannot
+     * consume or impersonate a live save confirmation. */
+    suspend fun commandReply(command: String, pattern: Regex, timeoutMs: Long = 30_000): String {
+        require(command.none { it == '\r' || it == '\n' || it == '\u0000' }) { "命令必须为单行" }
+        val current = connection ?: error("控制台尚未连接")
+        val reply = logEvents.expect(pattern, current)
+        try {
+            check(send("C\t$command", current)) { "无法发送存档命令" }
+            return kotlinx.coroutines.withTimeout(timeoutMs) { reply.await() }
+        } finally { reply.cancel() }
+    }
+
+    fun sendCommand(command: String): Boolean {
+        require(command.none { it == '\r' || it == '\n' || it == '\u0000' }) { "命令必须为单行" }
+        return send("C\t$command")
     }
 
     fun requestStop() {
@@ -163,14 +188,17 @@ object ConsoleSession {
         send("KILL")
     }
 
-    private fun send(frame: String) {
+    @Synchronized private fun send(frame: String, expected: Connection? = null): Boolean {
         try {
-            writer?.let {
-                it.write((frame + "\n").toByteArray(Charsets.UTF_8))
-                it.flush()
+            connection?.let { current ->
+                if (expected != null && current !== expected) return false
+                current.writer.write((frame + "\n").toByteArray(Charsets.UTF_8))
+                current.writer.flush()
+                return true
             }
         } catch (_: Exception) {
         }
+        return false
     }
 
     @Serializable
@@ -180,5 +208,9 @@ object ConsoleSession {
         val instanceId: String? = null,
         val exitCode: Int? = null,
         val error: String? = null,
+        val pid: Int? = null,
+        val memoryKb: Long? = null,
+        val cpuPercent: Double? = null,
+        val uptimeMs: Long? = null,
     )
 }

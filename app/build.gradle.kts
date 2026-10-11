@@ -52,8 +52,9 @@ android {
         applicationId = "com.mcmobile.server"
         minSdk = 26
         targetSdk = 35
-        versionCode = 5
-        versionName = "1.0.4"
+        versionCode = 7
+        versionName = "1.0.6"
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         externalNativeBuild {
             cmake {
@@ -146,11 +147,15 @@ dependencies {
     implementation(libs.coroutines.android)
     implementation(libs.serialization.json)
     implementation(libs.okhttp)
+    implementation("org.apache.commons:commons-compress:1.27.1")
+    implementation("org.tukaani:xz:1.10")
+    implementation("com.android.tools.build:apksig:8.7.3")
     implementation(libs.datastore.preferences)
     debugImplementation(libs.compose.ui.tooling)
     testImplementation(libs.junit)
     testImplementation(libs.coroutines.test)
     testImplementation(libs.okhttp.mockwebserver)
+    androidTestImplementation("androidx.test:runner:1.6.2")
 }
 
 fun sha256Of(file: File): String {
@@ -292,11 +297,16 @@ tasks.named("preBuild") { dependsOn(prepareJreAssets) }
 val prepareFrpc by tasks.registering {
     val version = "0.71.0"
     val digest = "845b486c63686990e671f13cc5e3bd130ce7be659ab3c6f043008353451858cb"
+    val binaryDigest = "8ed1c6a280452237c468850c3929ac9073990f6975853f2a197857e7079a9418"
+    val licenseDigest = "c6596eb7be8581c18be736c846fb9173b69eccf6ef94c5135893ec56bd92ba08"
     val destination = file("src/main/jniLibs/arm64-v8a/libfrpc.so")
     val license = file("src/main/assets/frp/LICENSE")
     inputs.property("sha256", digest)
+    inputs.property("binarySha256", binaryDigest)
     outputs.files(destination, license)
     doLast {
+        // Reuse the verified packaged artifact; a fresh checkout need not download it again.
+        if (destination.isFile && license.isFile && sha256Of(destination) == binaryDigest && sha256Of(license) == licenseDigest) return@doLast
         val cache = rootProject.layout.buildDirectory.dir("frp").get().asFile.apply { mkdirs() }
         val archive = File(cache, "frp_${version}_android_arm64.tar.gz")
         if (!archive.exists() || sha256Of(archive) != digest) {
@@ -312,11 +322,13 @@ val prepareFrpc by tasks.registering {
         File(extracted, "frpc").copyTo(destination, overwrite = true)
         license.parentFile.mkdirs()
         File(extracted, "LICENSE").copyTo(license, overwrite = true)
+        check(sha256Of(destination) == binaryDigest && sha256Of(license) == licenseDigest) { "FRP packaged artifact SHA-256 mismatch" }
     }
 }
 tasks.named("preBuild") { dependsOn(prepareFrpc) }
 
 tasks.withType<Test>().configureEach {
+    providers.gradleProperty("runtimeSamples").orNull?.let { systemProperty("mcs.runtime.samples", it) }
     testLogging { events("failed"); showStackTraces = true }
     // Workaround：项目路径含非 ASCII 字符时，Gradle 传给 Test worker 的 pathing-jar
     // 解码失败导致 ClassNotFoundException。把项目目录下的 classpath 条目复制到

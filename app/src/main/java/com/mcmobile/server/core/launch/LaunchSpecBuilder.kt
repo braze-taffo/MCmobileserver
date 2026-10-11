@@ -29,13 +29,41 @@ object LaunchSpecBuilder {
 
     private fun buildOrThrow(instance: ServerInstance, dir: File, javaHome: File): LaunchSpec {
         var argfileJvmOpts: List<String> = emptyList()
-        val (classpath, mainClass, args) = when (instance.type) {
+        fun confined(path: String): File = com.mcmobile.server.core.files.ManagedFiles(dir).checked(File(dir, path.removeSuffix("/*")))
+        fun classpath(paths: List<String>): String = paths.flatMap { path ->
+            val file = confined(path)
+            require(file.exists()) { "缺少启动依赖：$path" }
+            if (path.endsWith("/*")) {
+                require(file.isDirectory) { "Classpath 通配符需指向目录：$path" }
+                file.listFiles().orEmpty().filter { it.isFile && it.extension.equals("jar", true) }
+                    .sortedBy { it.name }.map { confined(it.relativeTo(dir).invariantSeparatorsPath).absolutePath }
+            } else listOf(file.absolutePath)
+        }.joinToString(":")
+        fun jarLaunch(jar: File): Triple<String, String, List<String>> {
+            val main = ManifestReader.readMainClass(jar) ?: error("无法读取 ${jar.name} 的 Main-Class")
+            val dependencies = ManifestReader.readClassPath(jar).map { path ->
+                val dependency = com.mcmobile.server.core.files.ManagedFiles(dir).checked(File(jar.parentFile, path))
+                require(dependency.exists()) { "缺少启动依赖：$path" }
+                dependency.absolutePath
+            }
+            return Triple((listOf(jar.absolutePath) + dependencies).joinToString(":"), main, instance.programArgs)
+        }
+        fun argLaunch(file: File?): Triple<String, String, List<String>> {
+            val parsed = LaunchArgfiles.parse(dir, file)
+            argfileJvmOpts = parsed.unixJvmArgs + parsed.userJvmArgs
+            val cp = classpath(parsed.classpathEntries)
+            return Triple(cp, parsed.mainClass, parsed.programArgs + instance.programArgs.filter { it !in parsed.programArgs })
+        }
+        require(instance.minHeapMb > 0 && instance.maxHeapMb >= instance.minHeapMb) { "内存配置无效" }
+        val (classpath, mainClass, args) = when {
+            instance.launchMainClass != null -> Triple(classpath(instance.launchClasspath), instance.launchMainClass, instance.programArgs)
+            instance.launchArgsFile != null -> argLaunch(confined(instance.launchArgsFile))
+            instance.launchJar != null -> jarLaunch(confined(instance.launchJar))
+            else -> when (instance.type) {
             ServerType.VANILLA, ServerType.PAPER, ServerType.FOLIA -> {
                 val jar = findCoreJar(dir)
                     ?: throw IllegalStateException("实例目录中没有服务器核心 jar（server.jar）")
-                val main = ManifestReader.readMainClass(jar)
-                    ?: throw IllegalStateException("无法读取 ${jar.name} 的 Main-Class")
-                Triple(jar.absolutePath, main, listOf("nogui"))
+                jarLaunch(jar)
             }
             ServerType.FABRIC -> {
                 // 必须从 fabric-server-launch.jar 进入：走 server.jar 的话加载的是纯原版，
@@ -43,24 +71,12 @@ object LaunchSpecBuilder {
                 val jar = File(dir, "fabric-server-launch.jar").takeIf { it.isFile }
                     ?: findCoreJar(dir)
                     ?: throw IllegalStateException("实例目录中没有服务器核心 jar（server.jar）")
-                val main = ManifestReader.readMainClass(jar)
-                    ?: throw IllegalStateException("无法读取 ${jar.name} 的 Main-Class")
-                Triple(jar.absolutePath, main, listOf("nogui"))
+                jarLaunch(jar)
             }
             ServerType.FORGE, ServerType.NEOFORGE -> {
-                val parsed = LaunchArgfiles.parse(dir)
-                // NeoForge 1.21 的 -p（模块路径）jar 已并入 classpathEntries，
-                // 但模块路径、--add-opens/--add-exports、-DlegacyClassPath 等
-                // 必须原样传给 VM，否则 BootstrapLauncher 起不来。
-                argfileJvmOpts = parsed.unixJvmArgs + parsed.userJvmArgs
-                // JVM 在 Android/Linux 上，classpath 分隔符固定为 ':'
-                val cp = parsed.classpathEntries.joinToString(":") {
-                    File(dir, it).absolutePath
-                }
-                val args = if ("nogui" in parsed.programArgs) parsed.programArgs
-                else parsed.programArgs + "nogui"
-                Triple(cp, parsed.mainClass, args)
+                argLaunch(null)
             }
+        }
         }
 
         // Paper/Folia 启动时会校验 java.version 是否属于官方 GA 版本，而内置 JVM 是自编译的

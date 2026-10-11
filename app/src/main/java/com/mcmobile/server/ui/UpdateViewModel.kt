@@ -49,6 +49,10 @@ class UpdateViewModel(app: Application) : AndroidViewModel(app), DefaultLifecycl
     }
 
     fun check(manual: Boolean = false) {
+        if (getApplication<Application>().packageName != "com.mcmobile.server") {
+            _state.update { it.copy(message = "自定义包名版本请在原应用更新后重新生成 APK", showDialog = false, release = null) }
+            return
+        }
         if (job?.isActive == true) return
         manualRequest = manual
         job = viewModelScope.launch {

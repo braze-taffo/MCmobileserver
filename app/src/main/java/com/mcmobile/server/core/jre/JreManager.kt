@@ -3,6 +3,7 @@ package com.mcmobile.server.core.jre
 import android.content.Context
 import android.os.Build
 import android.system.Os
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -25,6 +26,7 @@ data class JreState(
     /** 0f..1f，解压进度（按条目数估算） */
     val progress: Float = 0f,
     val error: String? = null,
+    val failureCause: Throwable? = null,
 )
 
 /**
@@ -35,7 +37,7 @@ data class JreState(
 object JreManager {
 
     /** 应用打包的 Java 大版本 */
-    val AVAILABLE_MAJORS = listOf(21, 25)
+    val AVAILABLE_MAJORS = listOf(8, 17, 21, 25)
 
     /**
      * libjvm 在 javaHome 里的标准位置。
@@ -66,12 +68,18 @@ object JreManager {
     fun javaHomeDir(context: Context, javaMajor: Int = 21): File =
         File(context.filesDir, "jre/${supportedAbi() ?: "unknown"}/$javaMajor")
 
-    fun libjvmFile(context: Context, javaMajor: Int = 21): File =
-        File(javaHomeDir(context, javaMajor), LIBJVM_REL)
+    fun libjvmFile(context: Context, javaMajor: Int = 21): File {
+        val home = javaHomeDir(context, javaMajor)
+        val marker = File(home, ".mcs-libjvm")
+        return File(home, if (marker.isFile) marker.readText().trim() else LIBJVM_REL)
+    }
+
+    fun libraryDir(home: File): File = File(home,
+        File(home, ".mcs-lib-dir").takeIf { it.isFile }?.readText()?.trim() ?: "lib")
 
     fun isReady(context: Context, javaMajor: Int = 21): Boolean {
         val home = javaHomeDir(context, javaMajor)
-        return File(home, "lib/modules").exists() && File(home, ".mcs-extracted").exists() &&
+        return (File(home, "lib/modules").exists() || (javaMajor == 8 && home.walkTopDown().any { it.name == "rt.jar" })) && File(home, ".mcs-extracted").exists() &&
             libjvmFile(context, javaMajor).exists()
     }
 
@@ -80,6 +88,7 @@ object JreManager {
      * 原生库仍然由 APK 提供（jniLibs 打包），这里只是让它出现在 HotSpot 期望的位置。
      */
     fun materializeLibjvm(context: Context, javaMajor: Int = 21): File {
+        if (javaMajor in listOf(8, 17)) return libjvmFile(context, javaMajor).also { check(it.isFile) { "Java $javaMajor 尚未下载完整" } }
         val dest = libjvmFile(context, javaMajor)
         if (dest.exists() && dest.length() > 0) return dest
         val abi = supportedAbi() ?: throw IllegalStateException("不支持的设备架构")
@@ -106,7 +115,33 @@ object JreManager {
 
     /** 幂等：已解压则直接返回；否则后台解压并更新 [state]。 */
     suspend fun ensureExtracted(context: Context, javaMajor: Int = 21) = withContext(Dispatchers.IO) {
-        mutex.withLock { ensureExtractedLocked(context.applicationContext, javaMajor) }
+        mutex.withLock {
+            try {
+                withRuntimeLock(context, javaMajor) { ensureExtractedLocked(context.applicationContext, javaMajor) }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Throwable) {
+                reportFailure(context, javaMajor, "准备运行时文件锁或检查目录", failure)
+            }
+        }
+    }
+
+    private fun reportFailure(context: Context, major: Int, stage: String, failure: Throwable) {
+        if (failure is CancellationException) throw failure
+        val description = RuntimeFailure.describe("Java $major $stage", failure)
+        android.util.Log.e("mcs-jre", description, failure)
+        _state.update {
+            it.copy(status = JreStatus.FAILED, abi = supportedAbi(), javaHome = javaHomeDir(context, major),
+                javaMajor = major, error = description, failureCause = failure)
+        }
+    }
+
+    private suspend fun withRuntimeLock(context: Context, major: Int, action: suspend () -> Unit) {
+        val parent = javaHomeDir(context, major).parentFile!!
+        parent.mkdirs()
+        java.io.RandomAccessFile(File(parent, ".java-$major.lock"), "rw").use { file ->
+            file.channel.lock().use { action() }
+        }
     }
 
     private suspend fun ensureExtractedLocked(appContext: Context, javaMajor: Int) {
@@ -116,6 +151,29 @@ object JreManager {
             return
         }
         val home = javaHomeDir(appContext, javaMajor)
+        if (javaMajor in listOf(8, 17)) {
+            if (isReady(appContext, javaMajor)) {
+                _state.value = JreState(JreStatus.READY, abi, home, readJavaVersion(home), javaMajor, 1f)
+                return
+            }
+            val staging = File(home.parentFile, "download-$javaMajor-${android.os.Process.myPid()}")
+            try {
+                staging.deleteRecursively()
+                home.parentFile!!.mkdirs()
+                _state.value = JreState(JreStatus.EXTRACTING, abi, home, javaMajor = javaMajor)
+                RuntimeDownload.prepare(javaMajor, abi, staging, appContext.cacheDir) { fraction, message ->
+                    _state.update { it.copy(progress = fraction, javaVersion = message, error = null, failureCause = null) }
+                }
+                if (!isReady(appContext, javaMajor)) {
+                    home.deleteRecursively()
+                    check(staging.renameTo(home)) { "运行时目录切换失败" }
+                }
+                _state.value = JreState(JreStatus.READY, abi, home, readJavaVersion(home), javaMajor, 1f)
+            } catch (e: Exception) {
+                reportFailure(appContext, javaMajor, "下载、解压或安装运行时", e)
+            } finally { staging.deleteRecursively() }
+            return
+        }
         val extracted = File(home, "lib/modules").exists() && File(home, ".mcs-extracted").exists()
         if (extracted) {
             // 已解压过：只补齐可能缺失的 libjvm（老安装结果里没有），避免重解压几百 MB
@@ -124,23 +182,25 @@ object JreManager {
                 _state.update {
                     it.copy(
                         status = JreStatus.READY, abi = abi, javaHome = home, javaMajor = javaMajor,
-                        javaVersion = readJavaVersion(home), progress = 1f, error = null,
+                        javaVersion = readJavaVersion(home), progress = 1f, error = null, failureCause = null,
                     )
                 }
             } catch (t: Throwable) {
-                _state.update { it.copy(status = JreStatus.FAILED, error = t.message ?: t.toString()) }
+                reportFailure(appContext, javaMajor, "补齐运行时原生库", t)
             }
             return
         }
 
         _state.update {
-            it.copy(status = JreStatus.EXTRACTING, abi = abi, javaHome = home, javaMajor = javaMajor, progress = 0f)
+            it.copy(status = JreStatus.EXTRACTING, abi = abi, javaHome = home, javaMajor = javaMajor, progress = 0f,
+                error = null, failureCause = null)
         }
         // UI 进程与 :server 进程可能同时解压同一套 JRE（跨进程 mutex 管不到）：
         // 全程写进本进程独有的 staging 目录，全部就绪后一次性切换成 home。
         // 无论哪一方被杀/失败，home 要么是旧内容要么是某一方完整切换的结果，
         // 绝不会出现"带 .mcs-extracted 标记的残缺目录"。
         val staging = File(home.parentFile, "staging-$javaMajor-${android.os.Process.myPid()}")
+        var stage = "读取内嵌运行时压缩包"
         try {
             staging.deleteRecursively()
             home.parentFile?.mkdirs()
@@ -152,6 +212,7 @@ object JreManager {
             appContext.assets.open("jre/$abi/$javaMajor.zip").use { input ->
                 tmpZip.outputStream().use { input.copyTo(it) }
             }
+            stage = "解压内嵌运行时"
             java.util.zip.ZipFile(tmpZip).use { zf ->
                 val entries = zf.entries().toList()
                 var count = 0
@@ -175,6 +236,7 @@ object JreManager {
                 }
             }
             tmpZip.delete()
+            stage = "切换运行时目录"
             // 标记先写进 staging 再切换：renameTo 成功的瞬间，home 一定携带完整内容
             File(staging, ".mcs-extracted").writeText("abi=$abi java=$javaMajor")
             home.deleteRecursively()
@@ -183,17 +245,18 @@ object JreManager {
                 throw IllegalStateException("JRE 目录切换失败：${staging.absolutePath}")
             }
             // libjvm 在切换后补齐：此处即使被杀，home 也完整，下次启动走上面的快速路径自愈
+            stage = "补齐运行时原生库"
             materializeLibjvm(appContext, javaMajor)
             _state.update {
                 it.copy(
                     status = JreStatus.READY, progress = 1f, javaMajor = javaMajor,
-                    javaVersion = readJavaVersion(home), error = null,
+                    javaVersion = readJavaVersion(home), error = null, failureCause = null,
                 )
             }
         } catch (t: Throwable) {
             // 只清自己的 staging。home 可能是并发方刚切换好的完整目录，绝不能删
             staging.deleteRecursively()
-            _state.update { it.copy(status = JreStatus.FAILED, error = t.message ?: t.toString()) }
+            reportFailure(appContext, javaMajor, stage, t)
         }
     }
 
@@ -214,8 +277,10 @@ object JreManager {
     /** 修复入口：删除后重新解压（设置页「重新解压」走这里；ensureExtracted 对已就绪目录只补 libjvm） */
     suspend fun repair(context: Context, javaMajor: Int = 21) = withContext(Dispatchers.IO) {
         mutex.withLock {
-            javaHomeDir(context.applicationContext, javaMajor).deleteRecursively()
-            ensureExtractedLocked(context.applicationContext, javaMajor)
+            withRuntimeLock(context, javaMajor) {
+                javaHomeDir(context.applicationContext, javaMajor).deleteRecursively()
+                ensureExtractedLocked(context.applicationContext, javaMajor)
+            }
         }
     }
 }

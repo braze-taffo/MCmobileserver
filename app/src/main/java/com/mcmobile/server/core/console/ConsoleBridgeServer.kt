@@ -7,13 +7,15 @@ import java.io.File
 import java.io.FileOutputStream
 import java.io.InputStreamReader
 import java.util.ArrayDeque
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * :server 进程内的控制台桥：
  *  - 维护最近日志的环形缓冲（UI 重连后回放）
  *  - 持有 LocalServerSocket，向所有已连接 UI 客户端广播
  *  - 接收 UI 发来的命令（C\t<cmd>）与控制指令（STOP/KILL）
- *  - 每行日志同步写入实例 logs/run-latest.log（无缓冲，进程随时可能被 System.exit 带走）
+ *  - 日志直接写入系统文件缓存；逐行不 fsync，正常关闭时同步一次
+ *  - 每个客户端独立发送、有界显示队列；慢客户端不阻塞日志泵
  */
 class ConsoleBridgeServer(
     socketName: String,
@@ -23,17 +25,21 @@ class ConsoleBridgeServer(
 ) {
     companion object {
         const val MAX_LINES = 3000
+        private const val MAX_HISTORY_BYTES = 1024 * 1024
+        private const val MAX_CLIENTS = 8
     }
 
-    private val history = ArrayDeque<String>()
-    private val clients = ArrayList<LocalSocket>()
+    private val history = ArrayDeque<ByteArray>()
+    private var historyBytes = 0
+    private val clients = ArrayList<Client>()
     private val lock = Any()
+    private val logLock = Any()
     private val server: LocalServerSocket = LocalServerSocket(socketName)
     private val logWriter: FileOutputStream? = logFile?.let { runCatching { FileOutputStream(it, true) }.getOrNull() }
     @Volatile private var closed = false
 
     /** 最近一次广播的状态；新客户端连上时要补发，否则它会一直不知道服务器已在运行 */
-    private var lastState: String? = null
+    private var lastState: ByteArray? = null
 
     fun start() {
         Thread({ acceptLoop() }, "mcs-console-accept").start()
@@ -42,32 +48,28 @@ class ConsoleBridgeServer(
     private fun acceptLoop() {
         while (!closed) {
             val socket = try { server.accept() } catch (_: Exception) { break }
-            synchronized(lock) {
-                // 新连接：先回放历史日志，再补发当前状态。
-                // 补状态是必须的：服务端广播 STARTING/RUNNING 时 UI 往往还没连上来，
-                // 少了这一步 UI 的 serverStatus 会一直是 null，控制台的输入框和
-                // 停止/强制结束按钮都会因为 running=false 而保持禁用。
-                // 先写完再入列，避免并发 appendLine 抢在回放前面造成乱序。
-                runCatching {
-                    val os = socket.outputStream
-                    for (line in history) os.write(frame(TYPE_LOG, line))
-                    lastState?.let { os.write(frame(TYPE_STATE, it)) }
+            val client = Client(socket)
+            val accepted = synchronized(lock) {
+                if (closed || clients.size >= MAX_CLIENTS) false else {
+                    // State need not wait for history. H marks replay so old
+                    // save confirmations cannot complete a new backup request.
+                    lastState?.let { client.queue.state(it) }
+                    for (bytes in history) client.queue.log(bytes.copyOf().also { it[0] = 'H'.code.toByte() })
+                    clients.add(client)
+                    true
                 }
-                clients.add(socket)
             }
-            Thread({ readLoop(socket) }, "mcs-console-client").start()
+            if (accepted) client.start() else client.close()
         }
     }
 
-    private fun readLoop(socket: LocalSocket) {
+    private fun readLoop(client: Client) {
         try {
-            BufferedReader(InputStreamReader(socket.inputStream, Charsets.UTF_8)).useLines { seq ->
+            BufferedReader(InputStreamReader(client.socket.inputStream, Charsets.UTF_8)).useLines { seq ->
                 for (raw in seq) handleClientLine(raw.trimEnd())
             }
         } catch (_: Exception) {
-        }
-        synchronized(lock) { clients.remove(socket) }
-        runCatching { socket.close() }
+        } finally { client.close() }
     }
 
     private fun handleClientLine(raw: String) {
@@ -81,29 +83,62 @@ class ConsoleBridgeServer(
 
     fun appendLine(line: String) {
         val bytes = frame(TYPE_LOG, line)
-        synchronized(lock) {
-            history.addLast(line)
-            while (history.size > MAX_LINES) history.removeFirst()
-            runCatching { logWriter?.write(bytes); logWriter?.fd?.sync() }
-            for (c in clients) runCatching { c.outputStream.write(bytes) }
+        // Preserve file/live order across producers; never hold the client lock
+        // during file IO. Unbuffered write survives System.exit via kernel cache.
+        synchronized(logLock) {
+            if (closed) return
+            runCatching { logWriter?.write(bytes) }
+            val priority = ConsoleReplyPatterns.isSaveReply(line)
+            synchronized(lock) {
+                history.addLast(bytes)
+                historyBytes += bytes.size
+                while (history.size > MAX_LINES || historyBytes > MAX_HISTORY_BYTES) historyBytes -= history.removeFirst().size
+                for (client in clients) client.queue.log(bytes, priority)
+            }
         }
     }
 
     fun broadcastState(json: String) {
         val bytes = frame(TYPE_STATE, json)
         synchronized(lock) {
-            lastState = json
-            for (c in clients) runCatching { c.outputStream.write(bytes) }
+            lastState = bytes
+            for (client in clients) client.queue.state(bytes)
         }
     }
 
     fun close() {
         closed = true
         runCatching { server.close() }
-        synchronized(lock) {
-            clients.forEach { runCatching { it.close() } }
-            clients.clear()
+        val snapshot = synchronized(lock) { clients.toList().also { clients.clear() } }
+        snapshot.forEach { it.close() }
+        synchronized(logLock) {
+            runCatching { logWriter?.fd?.sync() }
             runCatching { logWriter?.close() }
+        }
+    }
+
+    private inner class Client(val socket: LocalSocket) {
+        val queue = ConsoleOutboundQueue()
+        private val done = AtomicBoolean(false)
+        fun start() {
+            Thread({
+                try {
+                    val output = socket.outputStream
+                    while (!done.get()) output.write(queue.take() ?: break)
+                } catch (_: Exception) {
+                } finally { close() }
+            }, "mcs-console-send").start()
+            Thread({ readLoop(this) }, "mcs-console-client").start()
+        }
+        fun close() {
+            if (!done.compareAndSet(false, true)) return
+            synchronized(lock) { clients.remove(this) }
+            queue.close()
+            // shutdown wakes blocked native reads/writes; close alone need not
+            // interrupt an IO operation already holding the kernel descriptor.
+            runCatching { socket.shutdownInput() }
+            runCatching { socket.shutdownOutput() }
+            runCatching { socket.close() }
         }
     }
 

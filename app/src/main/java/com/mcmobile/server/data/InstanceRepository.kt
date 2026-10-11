@@ -35,7 +35,7 @@ class InstanceRepository(private val context: Context) {
         externalRoot = instance.externalRoot,
     )
 
-    suspend fun load() = withContext(Dispatchers.IO) {
+    suspend fun load() = mutex.withLock { withContext(Dispatchers.IO) {
         val f = manifestFile()
         if (!f.exists()) {
             _instances.value = emptyList()
@@ -62,6 +62,8 @@ class InstanceRepository(private val context: Context) {
         } else {
             "实例清单已损坏且备份失败，请勿在此设备继续新建实例"
         }
+    }
+
     }
 
     fun dismissLoadError() {
@@ -113,8 +115,12 @@ class InstanceRepository(private val context: Context) {
     }
 
     suspend fun update(instance: ServerInstance) = mutex.withLock {
-        _instances.value = _instances.value.map { if (it.id == instance.id) instance else it }
-        persist()
+        withContext(Dispatchers.IO) {
+            require(_instances.value.any { it.id == instance.id }) { "实例已被移除" }
+            val next = _instances.value.map { if (it.id == instance.id) instance else it }
+            InstanceManifest.writeAtomically(manifestFile(), InstanceManifest.encode(next))
+            _instances.value = next
+        }
     }
 
     /**
@@ -134,6 +140,62 @@ class InstanceRepository(private val context: Context) {
     }
 
     fun byId(id: String): ServerInstance? = _instances.value.firstOrNull { it.id == id }
+
+    /** Register only a fully prepared directory; no core download or installer is triggered. */
+    suspend fun registerPrepared(instance: ServerInstance): ServerInstance = mutex.withLock {
+        withContext(Dispatchers.IO) {
+            val directory = instanceDir(instance)
+            require(directory.isDirectory) { "服务端目录不存在" }
+            val path = directory.canonicalFile.toPath()
+            require(_instances.value.none {
+                val existing = instanceDir(it).canonicalFile.toPath()
+                path.startsWith(existing) || existing.startsWith(path)
+            }) { "这个目录已被管理，或与现有实例目录重叠" }
+            com.mcmobile.server.core.files.ServerPack.verify(instance, directory)
+            val previous = _instances.value
+            val marker = File(directory, ".mcs-instance.json")
+            val oldMarker = marker.takeIf { it.isFile }?.readBytes()
+            try {
+                InstanceMarkers.write(directory, instance)
+                val updated = previous + instance
+                InstanceManifest.writeAtomically(manifestFile(), InstanceManifest.encode(updated))
+                _instances.value = updated
+            } catch (t: Throwable) {
+                if (oldMarker != null) marker.writeBytes(oldMarker) else marker.delete()
+                throw t
+            }
+            instance
+        }
+    }
+
+    /** Copy first, switch the durable index, then remove the previous tree. */
+    suspend fun relocate(instance: ServerInstance, storage: StorageKind, parent: File,
+                         progress: (com.mcmobile.server.core.files.ManagedFiles.Progress) -> Unit): Boolean = mutex.withLock {
+        withContext(Dispatchers.IO) {
+            val current = byId(instance.id) ?: error("实例已移除")
+            val source = instanceDir(current)
+            val next = current.copy(storage = storage, externalRoot = parent.absolutePath.takeIf { storage == StorageKind.EXTERNAL },
+                backupRoot = com.mcmobile.server.core.manage.Backups.directory(context.filesDir, current, source).absolutePath)
+            val target = instanceDir(next)
+            val oldPath = source.canonicalFile.toPath(); val newPath = target.canonicalFile.toPath()
+            require(oldPath != newPath) { "已经位于这个目录" }
+            require(!newPath.startsWith(oldPath) && !oldPath.startsWith(newPath)) { "新旧服务端目录不能相互包含" }
+            require(!target.exists()) { "目标已有同名目录，请选择其他位置" }
+            require(_instances.value.filterNot { it.id == current.id }.none {
+                val existing = instanceDir(it).canonicalFile.toPath()
+                newPath.startsWith(existing) || existing.startsWith(newPath)
+            }) { "目标与现有实例目录重叠" }
+            parent.mkdirs()
+            try {
+                com.mcmobile.server.core.files.ServerPack.copy(source, target, progress)
+                InstanceMarkers.write(target, next)
+                val updated = _instances.value.map { if (it.id == current.id) next else it }
+                InstanceManifest.writeAtomically(manifestFile(), InstanceManifest.encode(updated))
+                _instances.value = updated
+            } catch (t: Throwable) { target.deleteRecursively(); throw t }
+            source.deleteRecursively()
+        }
+    }
 
     private fun sanitize(s: String): String = s.replace(Regex("[^A-Za-z0-9._-]"), "-")
 

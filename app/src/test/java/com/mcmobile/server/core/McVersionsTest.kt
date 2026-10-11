@@ -33,7 +33,8 @@ class McVersionsTest {
 
     @Test
     fun bundledRuntime_selection() {
-        assertEquals(21, McVersions.bundledJavaMajor("1.17"))
+        assertEquals(8, McVersions.bundledJavaMajor("1.12.2"))
+        assertEquals(17, McVersions.bundledJavaMajor("1.17"))
         assertEquals(21, McVersions.bundledJavaMajor("1.21.1"))
         assertEquals(25, McVersions.bundledJavaMajor("26.3"))
     }
@@ -41,7 +42,8 @@ class McVersionsTest {
     @Test
     fun bundledRuntime_fromAuthoritativeJava() {
         // 核心 jar 的 version.json 里声明的 Java 要求优先于版本号启发式
-        assertEquals(21, McVersions.bundledJavaMajorFor(17))
+        assertEquals(8, McVersions.bundledJavaMajorFor(8))
+        assertEquals(17, McVersions.bundledJavaMajorFor(17))
         assertEquals(21, McVersions.bundledJavaMajorFor(21))
         assertEquals(25, McVersions.bundledJavaMajorFor(25))
     }
@@ -68,8 +70,8 @@ class McVersionsTest {
         assertTrue(McVersions.isSupported("1.17"))
         assertTrue(McVersions.isSupported("1.21.1"))
         assertTrue(McVersions.isSupported("26.3"))
-        assertFalse(McVersions.isSupported("1.16.5"))
-        assertFalse(McVersions.isSupported("1.12.2"))
+        assertTrue(McVersions.isSupported("1.16.5"))
+        assertTrue(McVersions.isSupported("1.12.2"))
     }
 
     @Test

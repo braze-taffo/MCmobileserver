@@ -55,12 +55,18 @@ object McVersions {
     /** 应用内置运行时能否跑这个 MC 版本（Java 8 时代的旧版在 21 上会崩，16/17/18/20 由 21 覆盖） */
     fun isSupported(mcVersion: String): Boolean {
         val req = requiredJava(mcVersion)
-        return req >= 16 && (req <= 21 || req == 25)
+        return req in listOf(8, 16, 17, 21, 25)
     }
 
     /** 应使用的内置 JRE 大版本 */
     fun bundledJavaMajor(mcVersion: String): Int = bundledJavaMajorFor(requiredJava(mcVersion))
 
     /** 已知 Java 要求（如 jar 内 `version.json` 的 java_version）→ 应使用的内置 JRE 大版本 */
-    fun bundledJavaMajorFor(requiredJava: Int): Int = if (requiredJava >= 25) 25 else 21
+    fun bundledJavaMajorFor(requiredJava: Int): Int = when {
+        requiredJava in 1..8 -> 8
+        requiredJava in 9..17 -> 17
+        requiredJava in 18..21 -> 21
+        requiredJava in 22..25 -> 25
+        else -> error("不支持所需 Java 版本：$requiredJava")
+    }
 }

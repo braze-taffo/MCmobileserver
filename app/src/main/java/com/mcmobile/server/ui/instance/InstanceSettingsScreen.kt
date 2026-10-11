@@ -70,18 +70,43 @@ fun InstanceSettingsScreen(vm: AppViewModel, instance: ServerInstance, nav: NavC
     val heapUpper = maxOf(heapCap, 512, current.maxHeapMb)
 
     var heapMb by remember(current.id) { mutableIntStateOf(current.maxHeapMb.coerceIn(256, heapUpper)) }
+    var javaMajor by remember(current.id) { mutableIntStateOf(current.javaMajor) }
+    var minHeap by remember(current.id) { mutableStateOf(current.minHeapMb.toString()) }
+    var launchJar by remember(current.id) { mutableStateOf(current.launchJar.orEmpty()) }
+    var argsFile by remember(current.id) { mutableStateOf(current.launchArgsFile.orEmpty()) }
+    var mainClass by remember(current.id) { mutableStateOf(current.launchMainClass.orEmpty()) }
+    var classpath by remember(current.id) { mutableStateOf(current.launchClasspath.joinToString("\n")) }
+    var jvmArgs by remember(current.id) { mutableStateOf(com.mcmobile.server.core.launch.LaunchArgfiles.renderTokens(current.extraJvmArgs, "\n")) }
+    var programArgs by remember(current.id) { mutableStateOf(com.mcmobile.server.core.launch.LaunchArgfiles.renderTokens(current.programArgs)) }
+    var error by remember { mutableStateOf("") }
     var saved by remember { mutableStateOf(false) }
     var showUnsaved by remember { mutableStateOf(false) }
 
-    val dirty = heapMb != current.maxHeapMb
+    val dirty = heapMb != current.maxHeapMb || javaMajor != current.javaMajor || minHeap != current.minHeapMb.toString() ||
+        launchJar != current.launchJar.orEmpty() || argsFile != current.launchArgsFile.orEmpty() || mainClass != current.launchMainClass.orEmpty() ||
+        classpath != current.launchClasspath.joinToString("\n") || runCatching { com.mcmobile.server.core.launch.LaunchArgfiles.tokenize(jvmArgs) }.getOrNull() != current.extraJvmArgs ||
+        runCatching { com.mcmobile.server.core.launch.LaunchArgfiles.tokenize(programArgs) }.getOrNull() != current.programArgs
     val runningHere = consoleState.status == "CONNECTED" &&
             StartConflict.isActive(consoleState.serverStatus) &&
             consoleState.instanceId == current.id
 
-    fun save() {
-        if (!dirty) return
-        vm.updateInstance(current.copy(maxHeapMb = heapMb))
-        saved = true
+    fun save(): Boolean {
+        if (!dirty) return true
+        try {
+            val minimum = minHeap.toIntOrNull() ?: error("最小内存需为数字")
+            require(minimum in 64..heapMb) { "最小内存不能大于最大内存，且至少为 64 MB" }
+            val next = current.copy(maxHeapMb = heapMb, minHeapMb = minimum, javaMajor = javaMajor,
+                launchJar = launchJar.trim().takeIf { it.isNotEmpty() }, launchArgsFile = argsFile.trim().takeIf { it.isNotEmpty() },
+                launchMainClass = mainClass.trim().takeIf { it.isNotEmpty() }, launchClasspath = classpath.lineSequence().map { it.trim() }.filter { it.isNotBlank() }.toList(),
+                extraJvmArgs = com.mcmobile.server.core.launch.LaunchArgfiles.tokenize(jvmArgs), programArgs = com.mcmobile.server.core.launch.LaunchArgfiles.tokenize(programArgs))
+            require(listOf(next.launchJar, next.launchArgsFile, next.launchMainClass).count { it != null } <= 1) { "JAR、参数文件和手动主类只能选一种启动方式" }
+            require(next.extraJvmArgs.none { it in listOf("-jar", "-cp", "-classpath") }) { "请在启动入口中设置 JAR 或 classpath" }
+            val result = com.mcmobile.server.core.launch.LaunchSpecBuilder.build(next, vm.instanceDirOf(current), com.mcmobile.server.core.jre.JreManager.javaHomeDir(context, javaMajor))
+            require(result.spec != null) { result.error ?: "启动配置无效" }
+            vm.updateInstance(next)
+            saved = true; error = ""
+            return true
+        } catch (e: Exception) { error = e.message ?: "配置无效"; return false }
     }
 
     fun requestExit() {
@@ -97,9 +122,7 @@ fun InstanceSettingsScreen(vm: AppViewModel, instance: ServerInstance, nav: NavC
             text = { Text("退出将丢弃对实例设置的改动，或先保存再离开。") },
             confirmButton = {
                 TextButton(onClick = {
-                    save()
-                    showUnsaved = false
-                    nav.popBackStack()
+                    if (save()) { showUnsaved = false; nav.popBackStack() }
                 }) { Text("保存并退出") }
             },
             dismissButton = {
@@ -183,6 +206,21 @@ fun InstanceSettingsScreen(vm: AppViewModel, instance: ServerInstance, nav: NavC
                 }
             }
 
+            Text("Java 与启动入口", style = MaterialTheme.typography.titleMedium)
+            listOf(8, 17, 21, 25).chunked(2).forEach { group ->
+                androidx.compose.foundation.layout.Row { group.forEach { major ->
+                    androidx.compose.material3.FilterChip(javaMajor == major, { javaMajor = major }, label = { Text("Java $major") })
+                } }
+            }
+            Text("Java 8/17 在首次启动时下载；此页设置在下次启动生效。", style = MaterialTheme.typography.bodySmall)
+            androidx.compose.material3.OutlinedTextField(minHeap, { minHeap = it }, label = { Text("最小内存 MB") })
+            androidx.compose.material3.OutlinedTextField(launchJar, { launchJar = it }, label = { Text("启动 JAR（相对实例目录；留空使用默认）") }, modifier = Modifier.fillMaxWidth())
+            androidx.compose.material3.OutlinedTextField(argsFile, { argsFile = it }, label = { Text("启动参数文件（相对实例目录）") }, modifier = Modifier.fillMaxWidth())
+            androidx.compose.material3.OutlinedTextField(mainClass, { mainClass = it }, label = { Text("高级：手动主类（与以上两项互斥）") }, modifier = Modifier.fillMaxWidth())
+            if (mainClass.isNotBlank()) androidx.compose.material3.OutlinedTextField(classpath, { classpath = it }, label = { Text("Classpath，每行一个相对路径") }, modifier = Modifier.fillMaxWidth())
+            androidx.compose.material3.OutlinedTextField(jvmArgs, { jvmArgs = it }, label = { Text("额外 JVM 参数（支持引号，可换行）") }, modifier = Modifier.fillMaxWidth())
+            androidx.compose.material3.OutlinedTextField(programArgs, { programArgs = it }, label = { Text("服务端程序参数") }, modifier = Modifier.fillMaxWidth())
+            if (error.isNotBlank()) Text(error, color = MaterialTheme.colorScheme.error)
             Spacer(Modifier.height(4.dp))
 
             Button(

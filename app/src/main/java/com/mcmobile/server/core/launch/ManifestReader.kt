@@ -6,6 +6,13 @@ import java.util.jar.JarFile
 /** 读取 jar Manifest 的 Main-Class */
 object ManifestReader {
 
+    fun readClassPath(jar: File): List<String> = runCatching {
+        JarFile(jar).use { jf ->
+            jf.manifest?.mainAttributes?.getValue("Class-Path")
+                ?.split(Regex("\\s+"))?.filter { it.isNotBlank() }.orEmpty()
+        }
+    }.getOrDefault(emptyList())
+
     fun readMainClass(jar: File): String? = runCatching {
         JarFile(jar).use { jf ->
             jf.manifest?.mainAttributes?.getValue("Main-Class")

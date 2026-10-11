@@ -264,7 +264,7 @@ class ServerController(private val context: Context, private val repo: InstanceR
      *
      * @return true 表示确认已停（或本来就没在跑）；false 表示超时仍在跑
      */
-    suspend fun stopAndWait(gracefulMs: Long = 12_000, forceMs: Long = 8_000): Boolean {
+    suspend fun stopAndWait(gracefulMs: Long = 12_000, forceMs: Long = 8_000, forceOnTimeout: Boolean = true): Boolean {
         // 连不上 ≠ 没在跑：:server 冷启动到 socket bind 有数秒窗口（UI 重启后、
         // 或刚点启动还没起完）。短轮询盖住这个窗口再下结论；进程真不在时
         // abstract socket 立即拒连，正常删除最多多等约 2 秒。
@@ -279,6 +279,7 @@ class ServerController(private val context: Context, private val repo: InstanceR
         if (!ConsoleSession.isConnected()) return true
         stop(force = false)
         if (awaitExit(gracefulMs)) return true
+        if (!forceOnTimeout) return false
         stop(force = true)
         return awaitExit(forceMs)
     }

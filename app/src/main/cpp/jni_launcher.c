@@ -308,10 +308,18 @@ static int preload_dir(const char *dir) {
     return loaded;
 }
 
+static void runtime_library_paths(const launch_req *req, char *lib, char *server) {
+    snprintf(server, 4096, "%s", req->libjvm_path);
+    char *end = strrchr(server, '/');
+    if (end != NULL) *end = '\0';
+    snprintf(lib, 4096, "%s", server);
+    end = strrchr(lib, '/');
+    if (end != NULL) *end = '\0';
+}
+
 static void prepare_linker_path(const launch_req *req) {
     char lib[4096], server[4096];
-    snprintf(lib, sizeof(lib), "%s/lib", req->java_home);
-    snprintf(server, sizeof(server), "%s/lib/server", req->java_home);
+    runtime_library_paths(req, lib, server);
 
     const char *old = getenv("LD_LIBRARY_PATH");
     char val[8192];
@@ -359,8 +367,7 @@ static void *thread_main(void *arg) {
     /* 2) JRE 原生库就位（libjava 等依赖 libjvm.so，靠上面的全局加载满足） */
     prepare_linker_path(req);
     char lib_dir[4096], server_dir[4096];
-    snprintf(lib_dir, sizeof(lib_dir), "%s/lib", req->java_home);
-    snprintf(server_dir, sizeof(server_dir), "%s/lib/server", req->java_home);
+    runtime_library_paths(req, lib_dir, server_dir);
     preload_dir(lib_dir);
     preload_dir(server_dir);
 

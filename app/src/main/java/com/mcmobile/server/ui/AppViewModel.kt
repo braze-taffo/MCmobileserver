@@ -98,6 +98,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                     // 连上且服务器在跑 → 算一次局域网地址（枚举网卡 + 读文件，别放主线程）。
                     // 每次状态变化都重算：中途切 Wi-Fi/热点时 IP 会变，显示要跟着更新。
                     st.status == "CONNECTED" && StartConflict.isActive(st.serverStatus) -> {
+                        if (st.instanceId != null && _activeInstanceId.value != st.instanceId) {
+                            _activeInstanceId.value = st.instanceId
+                            com.mcmobile.server.service.ManagementService.start(getApplication())
+                        }
                         // 优先信状态帧报的实例：UI 重启后 _activeInstanceId 是空的，
                         // 但 :server 可能还在跑（此时局域网地址一样要显示出来）
                         (_activeInstanceId.value ?: st.instanceId)?.let { id ->
@@ -160,6 +164,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             when (val r = controller.start(instance)) {
                 is ServerController.StartResult.Started -> {
+                    com.mcmobile.server.service.ManagementService.start(getApplication())
                     // 换实例就必须换一份日志：控制台缓冲是全局的，
                     // 不清掉的话新实例的控制台里会混着上一个实例（甚至已被删除的实例）的输出
                     _consoleLines.value = emptyList()
@@ -210,12 +215,27 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     fun instanceById(id: String) = repo.byId(id)
 
+    fun isRunning(id: String): Boolean = _activeInstanceId.value == id ||
+        (consoleState.value.instanceId == id && consoleState.value.status == "CONNECTED" && StartConflict.isActive(consoleState.value.serverStatus))
+
+    suspend fun registerPrepared(instance: ServerInstance) = repo.registerPrepared(instance)
+    suspend fun relocate(instance: ServerInstance, storage: com.mcmobile.server.data.StorageKind, parent: File,
+                         progress: (com.mcmobile.server.core.files.ManagedFiles.Progress) -> Unit) = repo.relocate(instance, storage, parent, progress)
+
+    fun backupsDir(instance: ServerInstance): File =
+        com.mcmobile.server.core.manage.Backups.directory(getApplication<Application>().filesDir, instance, repo.instanceDir(instance))
+
+    fun taskStore() = com.mcmobile.server.core.manage.TaskStore(File(getApplication<Application>().filesDir, "server-tasks.json"))
+
     /**
      * 更新实例设置（内存等）。只改清单，不动正在运行的服务器：
      * 新配置在下次启动时由 LaunchSpecBuilder 读清单生效。
      */
     fun updateInstance(instance: ServerInstance) {
-        viewModelScope.launch { repo.update(instance) }
+        viewModelScope.launch {
+            try { repo.update(instance) }
+            catch (e: Exception) { _events.emit(UiEvent.Error("实例设置保存失败：${e.message}")) }
+        }
     }
 
     /**

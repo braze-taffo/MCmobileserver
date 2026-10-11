@@ -13,6 +13,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.Button
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Card
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -56,6 +57,8 @@ fun SettingsScreen(vm: AppViewModel, nav: NavController, updates: UpdateViewMode
     val scope = androidx.compose.runtime.rememberCoroutineScope()
     val update by updates.state.collectAsState()
     val instances by vm.instances.collectAsState()
+    val serverState by com.mcmobile.server.core.console.ConsoleSession.state.collectAsState()
+    val serverActive = serverState.status == "CONNECTED" && com.mcmobile.server.core.console.StartConflict.isActive(serverState.serverStatus)
 
     // 授权页不返回结果，回到应用后重新查一次
     var hasWriteAccess by remember { mutableStateOf(StorageLocation.hasWriteAccess(context)) }
@@ -64,7 +67,7 @@ fun SettingsScreen(vm: AppViewModel, nav: NavController, updates: UpdateViewMode
     ) { hasWriteAccess = StorageLocation.hasWriteAccess(context) }
 
     LaunchedEffect(Unit) {
-        // 展示两个运行时的就绪状态（不主动解压 25，按需在使用时解压）
+        com.mcmobile.server.core.console.ConsoleSession.activeServer(attempts = 1)
     }
 
     Scaffold(
@@ -87,6 +90,10 @@ fun SettingsScreen(vm: AppViewModel, nav: NavController, updates: UpdateViewMode
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
+
+            OutlinedButton(onClick = { nav.navigate(com.mcmobile.server.ui.Routes.CUSTOM_APK) }, modifier = Modifier.fillMaxWidth()) {
+                Text("自签名与自定义包名")
+            }
             Card(Modifier.fillMaxWidth()) {
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text("应用更新", style = MaterialTheme.typography.titleMedium)
@@ -108,7 +115,8 @@ fun SettingsScreen(vm: AppViewModel, nav: NavController, updates: UpdateViewMode
             }
             Card {
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("内嵌 Java 运行时", style = MaterialTheme.typography.titleMedium)
+                    Text("Java 运行时", style = MaterialTheme.typography.titleMedium)
+                    Text("Java 8/17 按需下载，下载后可离线使用；21/25 随应用提供。修复运行时前请停服。", style = MaterialTheme.typography.bodySmall)
                     Text(
                         "设备架构：${JreManager.supportedAbi() ?: "不支持"}",
                         style = MaterialTheme.typography.bodyMedium,
@@ -122,7 +130,7 @@ fun SettingsScreen(vm: AppViewModel, nav: NavController, updates: UpdateViewMode
                                 fontWeight = FontWeight.Medium,
                             )
                             Text(
-                                if (ready) "已就绪" else "未解压",
+                                if (ready) "已就绪" else if (major in listOf(8, 17)) "未下载" else "未解压",
                                 color = if (ready) MaterialTheme.colorScheme.primary
                                 else MaterialTheme.colorScheme.onSurfaceVariant,
                                 style = MaterialTheme.typography.labelMedium,
@@ -131,16 +139,16 @@ fun SettingsScreen(vm: AppViewModel, nav: NavController, updates: UpdateViewMode
                             Button(
                                 // 解压中禁点：ensureExtracted 虽有互斥，连点仍会排队
                                 // 触发一串无谓的重复解压
-                                enabled = jreState.status != JreStatus.EXTRACTING,
+                                enabled = jreState.status != JreStatus.EXTRACTING && !serverActive,
                                 onClick = {
                                     scope.launch {
-                                        // 「重新解压」必须走 repair：ensureExtracted 对已就绪
-                                        // 目录只补 libjvm，救不了中途损坏的 JRE
-                                        if (ready) JreManager.repair(context, major)
-                                        else JreManager.ensureExtracted(context, major)
+                                        if (com.mcmobile.server.core.console.ConsoleSession.activeServer(attempts = 1) == null) {
+                                            if (ready) JreManager.repair(context, major)
+                                            else JreManager.ensureExtracted(context, major)
+                                        } else android.widget.Toast.makeText(context, "请先停服再准备或修复运行时", android.widget.Toast.LENGTH_LONG).show()
                                     }
                                 },
-                            ) { Text(if (ready) "重新解压" else "解压") }
+                            ) { Text(if (ready) "修复" else if (major in listOf(8, 17)) "下载" else "解压") }
                         }
                     }
                     if (jreState.status == JreStatus.EXTRACTING) {
@@ -149,7 +157,7 @@ fun SettingsScreen(vm: AppViewModel, nav: NavController, updates: UpdateViewMode
                             modifier = Modifier.fillMaxWidth(),
                         )
                         Text(
-                            "解压中 ${(jreState.progress * 100).toInt()}%",
+                            "准备 Java ${jreState.javaMajor}：${(jreState.progress * 100).toInt()}%",
                             style = MaterialTheme.typography.labelSmall,
                         )
                     }
@@ -157,7 +165,7 @@ fun SettingsScreen(vm: AppViewModel, nav: NavController, updates: UpdateViewMode
                         Text(it, color = MaterialTheme.colorScheme.error)
                     }
                     jreState.javaVersion?.let {
-                        Text("当前版本：OpenJDK $it", style = MaterialTheme.typography.bodySmall)
+                        Text(if (jreState.status == JreStatus.EXTRACTING) it else "当前版本：OpenJDK $it", style = MaterialTheme.typography.bodySmall)
                     }
                 }
             }

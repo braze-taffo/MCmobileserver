@@ -128,4 +128,33 @@ class LaunchSpecBuilderTest {
         assertNotNull(spec)
         assertEquals("net.minecraft.bundler.Main", spec!!.mainClass)
     }
+
+    @Test fun forgeShimArgfileBuildsJniLaunchWithManifestClasspath() {
+        val dir = tmp.newFolder("forge")
+        val jar = File(dir, "forge-1.21.11-61.2.0-shim.jar")
+        JarOutputStream(jar.outputStream()).use { out ->
+            out.putNextEntry(ZipEntry("META-INF/MANIFEST.MF"))
+            out.write(("Manifest-Version: 1.0\r\nMain-Class: net.minecraftforge.bootstrap.shim.Main\r\n" +
+                "Class-Path: libraries/bootstrap.jar\r\n\r\n").toByteArray())
+            out.closeEntry()
+        }
+        File(dir, "libraries/bootstrap.jar").apply { parentFile.mkdirs(); writeText("fixture") }
+        val argfile = File(dir, "libraries/net/minecraftforge/forge/1.21.11-61.2.0/unix_args.txt").apply {
+            parentFile.mkdirs()
+            writeText("-Djava.net.preferIPv6Addresses=system -jar ${jar.name} --safeMode")
+        }
+        File(dir, "user_jvm_args.txt").writeText("-Dcustom=true")
+        val home = File(tmp.root, "java21")
+        for (selectedFile in listOf(null, argfile.relativeTo(dir).invariantSeparatorsPath)) {
+            val result = LaunchSpecBuilder.build(instance(ServerType.FORGE, "1.21.11", 21).copy(launchArgsFile = selectedFile), dir, home)
+            assertEquals(null, result.error)
+            val spec = result.spec!!
+            assertEquals("net.minecraftforge.bootstrap.shim.Main", spec.mainClass)
+            assertEquals(listOf(jar.absolutePath, File(dir, "libraries/bootstrap.jar").absolutePath).joinToString(":"), spec.classpath)
+            assertFalse(spec.jvmOpts.contains("-jar"))
+            assertTrue(spec.jvmOpts.contains("-Djava.net.preferIPv6Addresses=system"))
+            assertTrue(spec.jvmOpts.contains("-Dcustom=true"))
+            assertEquals(listOf("--safeMode", "nogui"), spec.args)
+        }
+    }
 }

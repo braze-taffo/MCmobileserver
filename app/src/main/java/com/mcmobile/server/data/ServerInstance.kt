@@ -47,6 +47,14 @@ data class ServerInstance(
     val installed: Boolean = false,
     /** 额外 JVM 参数（-D/-X 开头） */
     val extraJvmArgs: List<String> = emptyList(),
+    /** Relative to the instance root; imported packs keep their original entry point. */
+    val launchJar: String? = null,
+    val launchArgsFile: String? = null,
+    val launchMainClass: String? = null,
+    val launchClasspath: List<String> = emptyList(),
+    val programArgs: List<String> = listOf("nogui"),
+    /** Keep backups reachable when relocating the server directory. */
+    val backupRoot: String? = null,
 ) {
     val needsInstaller: Boolean get() = type == ServerType.FORGE || type == ServerType.NEOFORGE
 }

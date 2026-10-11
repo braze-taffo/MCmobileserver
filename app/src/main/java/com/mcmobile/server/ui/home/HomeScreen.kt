@@ -1,6 +1,7 @@
 package com.mcmobile.server.ui.home
 
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -65,12 +66,8 @@ fun HomeScreen(vm: AppViewModel, nav: NavController) {
     val installingId by vm.installingId.collectAsState()
     val deletingId by vm.deletingId.collectAsState()
     val loadError by vm.loadError.collectAsState()
-    var eulaInstance by remember { mutableStateOf<ServerInstance?>(null) }
     var pendingDelete by remember { mutableStateOf<ServerInstance?>(null) }
 
-    LaunchedEffect(Unit) {
-        vm.events.collect { if (it is UiEvent.NeedEula) eulaInstance = it.instance }
-    }
 
     // 删除不可撤销（地图、配置、日志一起没），必须二次确认
     pendingDelete?.let { inst ->
@@ -128,27 +125,6 @@ fun HomeScreen(vm: AppViewModel, nav: NavController) {
         }
     }
 
-    eulaInstance?.let { inst ->
-        AlertDialog(
-            onDismissRequest = { eulaInstance = null },
-            title = { Text("Mojang EULA") },
-            text = {
-                Text(
-                    "运行 Minecraft 服务端需要同意 Mojang 的最终用户许可协议（EULA）。\n\n" +
-                            "这允许在本设备上运行用于联机的服务端软件。\n\n是否同意？",
-                )
-            },
-            confirmButton = {
-                TextButton(onClick = {
-                    eulaInstance = null
-                    vm.acceptEula(inst)
-                }) { Text("同意并启动") }
-            },
-            dismissButton = {
-                TextButton(onClick = { eulaInstance = null }) { Text("取消") }
-            },
-        )
-    }
 
     Scaffold(
         topBar = {
@@ -170,6 +146,7 @@ fun HomeScreen(vm: AppViewModel, nav: NavController) {
                         fontWeight = FontWeight.Bold,
                     )
                     Spacer(Modifier.weight(1f))
+                    TextButton(onClick = { nav.navigate(Routes.PACK_IMPORT) }) { Text("导入整包", color = MaterialTheme.colorScheme.onPrimary) }
                     TextButton(onClick = { nav.navigate(Routes.FRP) }) {
                         Text("内网穿透", color = MaterialTheme.colorScheme.onPrimary)
                     }
@@ -237,6 +214,7 @@ fun HomeScreen(vm: AppViewModel, nav: NavController) {
                             canStart = activeId == null,
                             onStart = { vm.start(inst) },
                             onConsole = { nav.navigate(Routes.CONSOLE) },
+                            onManage = { nav.navigate(Routes.manage(inst.id)) },
                             onProperties = { nav.navigate(Routes.properties(inst.id)) },
                             onFiles = { nav.navigate(Routes.files(inst.id)) },
                             onInstanceSettings = { nav.navigate(Routes.instance(inst.id)) },
@@ -259,12 +237,13 @@ private fun InstanceCard(
     canStart: Boolean,
     onStart: () -> Unit,
     onConsole: () -> Unit,
+    onManage: () -> Unit,
     onProperties: () -> Unit,
     onFiles: () -> Unit,
     onInstanceSettings: () -> Unit,
     onDelete: () -> Unit,
 ) {
-    Card(modifier = Modifier.fillMaxWidth()) {
+    Card(modifier = Modifier.fillMaxWidth().clickable(onClick = onManage)) {
         Column(Modifier.padding(16.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
@@ -320,18 +299,7 @@ private fun InstanceCard(
                             else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f))
                     }
                 }
-                IconButton(onClick = onFiles) {
-                    Icon(Icons.Default.Folder, "文件",
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
-                IconButton(onClick = onInstanceSettings) {
-                    Icon(Icons.Default.Memory, "实例设置（内存）",
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
-                IconButton(onClick = onProperties) {
-                    Icon(Icons.Default.Tune, "配置",
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
+                TextButton(onClick = onManage) { Text("管理面板") }
                 Spacer(Modifier.weight(1f))
                 IconButton(onClick = onDelete) {
                     Icon(Icons.Default.Delete, "删除",

@@ -2,6 +2,7 @@ package com.mcmobile.server.core.manage
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.nio.charset.Charset
 import java.nio.charset.StandardCharsets
@@ -11,6 +12,36 @@ class ModMetadataTextTest {
 
     @Test fun utf8RoundTrips() {
         assertEquals(chinese, ModMetadataText.decode(chinese.toByteArray(StandardCharsets.UTF_8)))
+    }
+
+    @Test fun utf8TwoByteLatinRoundTripsAheadOfGbk() {
+        // é is C3 A9: legal UTF-8 and legal GBK. GBK would yield U+8305. Strict UTF-8 must win.
+        listOf("café", "Résumé").forEach { text ->
+            val utf8 = text.toByteArray(StandardCharsets.UTF_8)
+            val decoded = ModMetadataText.decode(utf8)
+            assertEquals(text, decoded)
+            assertFalse(decoded.any { it in '\u4E00'..'\u9FFF' })
+            val asGbk = String(utf8, Charset.forName("GBK"))
+            assertTrue(asGbk != text)
+            assertTrue(asGbk.any { it in '\u4E00'..'\u9FFF' })
+        }
+    }
+
+    @Test fun latin1HighByteDoesNotDecodeAsGbk() {
+        val latin1 = Charset.forName("ISO-8859-1")
+        val bare = ModMetadataText.decode("Übermod".toByteArray(latin1))
+        assertEquals("\uFFFDbermod", bare)
+        assertFalse(bare.contains('\u8EA1'))
+        assertFalse(bare.any { it in '\u4E00'..'\u9FFF' })
+
+        val json = """{"name":"Übermod","description":"Ein Mod für Freunde"}"""
+        val decoded = ModMetadataText.decode(json.toByteArray(latin1))
+        assertEquals(
+            "{\"name\":\"\uFFFDbermod\",\"description\":\"Ein Mod f\uFFFDr Freunde\"}",
+            decoded,
+        )
+        assertFalse(decoded.contains('\u8EA1'))
+        assertFalse(decoded.any { it in '\u4E00'..'\u9FFF' })
     }
 
     @Test fun utf8BomIsStripped() {

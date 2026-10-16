@@ -16,9 +16,29 @@ object ModMetadataText {
             return decodeStrict(payload, bom) ?: decodeReplacing(payload, bom)
         }
         return decodeStrict(payload, StandardCharsets.UTF_8)
-            ?: charsetOrNull("GB18030")?.let { decodeStrict(payload, it) }
-            ?: charsetOrNull("GBK")?.let { decodeStrict(payload, it) }
+            ?: decodeLegacyChinese(payload)
             ?: decodeReplacing(payload, StandardCharsets.UTF_8)
+    }
+
+    /**
+     * GB18030/GBK is only a fallback for Chinese metadata. A Latin-1 high byte
+     * paired with an ASCII trail (Über → U+8EA1) is one high byte per hanzi;
+     * common GBK uses two. Reject the one-byte shape and keep UTF-8 replacement.
+     */
+    private fun decodeLegacyChinese(bytes: ByteArray): String? {
+        for (name in arrayOf("GB18030", "GBK")) {
+            val charset = charsetOrNull(name) ?: continue
+            val decoded = decodeStrict(bytes, charset) ?: continue
+            if (looksLikeDoubleByteChinese(bytes, decoded)) return decoded
+        }
+        return null
+    }
+
+    private fun looksLikeDoubleByteChinese(bytes: ByteArray, text: String): Boolean {
+        val cjk = text.count { it in '\u3400'..'\u4DBF' || it in '\u4E00'..'\u9FFF' || it in '\uF900'..'\uFAFF' }
+        if (cjk == 0) return false
+        val nonAscii = bytes.count { (it.toInt() and 0xFF) >= 0x80 }
+        return nonAscii > cjk
     }
 
     private fun bomCharset(bytes: ByteArray): Charset? = when {

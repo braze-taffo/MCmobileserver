@@ -19,5 +19,14 @@ class StubDdnsProvider(override val id: DdnsProviderId) : DdnsProvider {
 }
 
 object DdnsProviders {
-    fun of(id: DdnsProviderId, http: OkHttpClient): DdnsProvider = StubDdnsProvider(id)
+    fun of(
+        id: DdnsProviderId,
+        http: OkHttpClient,
+        apiRoot: String = CloudflareProvider.DEFAULT_API_ROOT,
+    ): DdnsProvider = when (id) {
+        DdnsProviderId.CLOUDFLARE -> CloudflareProvider(http, apiRoot)
+        DdnsProviderId.DUCKDNS -> DuckDnsProvider(http)
+        DdnsProviderId.WEBHOOK -> WebhookProvider(http)
+        DdnsProviderId.ALIYUN, DdnsProviderId.DNSPOD -> StubDdnsProvider(id)
+    }
 }

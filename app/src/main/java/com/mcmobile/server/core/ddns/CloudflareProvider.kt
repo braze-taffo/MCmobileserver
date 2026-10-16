@@ -20,9 +20,10 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.HttpUrl.Companion.toHttpUrl
 
 class CloudflareProvider(
-    private val http: OkHttpClient,
+    http: OkHttpClient,
     private val apiRoot: String = DEFAULT_API_ROOT,
 ) : DdnsProvider {
+    private val http = http.noRedirects()
     override val id = DdnsProviderId.CLOUDFLARE
 
     override suspend fun apply(ipv4: String?, ipv6: String?, config: DdnsConfig): DdnsResult = withContext(Dispatchers.IO) {
@@ -74,9 +75,7 @@ class CloudflareProvider(
         return try {
             http.newCall(call.build()).execute().use { response ->
                 httpFailure(response.code)?.let { return it }
-                if (!success(response.body?.string().orEmpty())) {
-                    return DdnsResult.Failed("Cloudflare 拒绝了$type 更新", retryable = false)
-                }
+                rejectedWrite(response.body?.string().orEmpty(), type)?.let { return it }
             }
             DdnsResult.Updated(if (type == "A") ip else null, if (type == "AAAA") ip else null, "$type 已更新$extra")
         } catch (e: CancellationException) {
@@ -103,11 +102,15 @@ class CloudflareProvider(
     private fun payload(type: String, name: String, ip: String) =
         json.encodeToString(CfBody(type, name, ip)).toRequestBody(JSON)
 
-    private fun success(body: String): Boolean {
-        if (body.isBlank()) return true
-        return runCatching {
-            json.parseToJsonElement(body).jsonObject["success"]?.jsonPrimitive?.booleanOrNull ?: true
-        }.getOrDefault(true)
+    private fun rejectedWrite(body: String, type: String): DdnsResult.Failed? {
+        if (body.isBlank()) return DdnsResult.Failed("Cloudflare 响应为空", retryable = true)
+        val obj = runCatching { json.parseToJsonElement(body).jsonObject }.getOrNull()
+            ?: return DdnsResult.Failed("Cloudflare 响应无法解析", retryable = true)
+        return when (obj["success"]?.jsonPrimitive?.booleanOrNull) {
+            true -> null
+            false -> DdnsResult.Failed("Cloudflare 拒绝了$type 更新", retryable = false)
+            null -> DdnsResult.Failed("Cloudflare 响应无法解析", retryable = true)
+        }
     }
 
     private fun parseRecords(body: String): List<CfRecord> {

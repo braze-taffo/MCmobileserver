@@ -9,9 +9,10 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 
 class DuckDnsProvider(
-    private val http: OkHttpClient,
+    http: OkHttpClient,
     private val endpoint: String = DEFAULT_ENDPOINT,
 ) : DdnsProvider {
+    private val http = http.noRedirects()
     override val id = DdnsProviderId.DUCKDNS
 
     override suspend fun apply(ipv4: String?, ipv6: String?, config: DdnsConfig): DdnsResult = withContext(Dispatchers.IO) {

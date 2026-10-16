@@ -85,4 +85,14 @@ class DdnsConfigTest {
         assertNotEquals(fp, cf.copy(hostname = "other.example.com").fingerprint())
         assertEquals(cf.copy(intervalSec = 90).fingerprint(), fp)
     }
+
+    @Test fun fingerprintOmitsWebhookSecret() {
+        val url = "https://hooks.example/update?token=super-secret&ip={ipv4}"
+        val fp = hook.copy(webhookUrl = url).fingerprint()
+        assertFalse(fp.contains("super-secret"))
+        assertFalse(fp.contains("hooks.example"))
+        assertFalse(fp.contains(url))
+        assertFalse(fp.contains("?"))
+        assertNotEquals(fp, hook.copy(webhookUrl = "$url&x=1").fingerprint())
+    }
 }

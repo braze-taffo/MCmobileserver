@@ -52,4 +52,18 @@ class DuckDnsProviderTest {
             assertEquals("2001:db8::5", url.queryParameter("ipv6"))
         }
     }
+
+    @Test fun doesNotFollowRedirects() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(
+                MockResponse().setResponseCode(302).addHeader("Location", server.url("/stolen").toString()),
+            )
+            server.enqueue(MockResponse().setBody("OK"))
+            val failed = DuckDnsProvider(OkHttpClient(), server.url("/update").toString())
+                .apply("203.0.113.5", null, config) as DdnsResult.Failed
+            assertTrue(failed.message.contains("302"))
+            assertFalse(failed.retryable)
+            assertEquals(1, server.requestCount)
+        }
+    }
 }

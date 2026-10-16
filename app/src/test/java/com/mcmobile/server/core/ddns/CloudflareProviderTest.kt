@@ -112,6 +112,36 @@ class CloudflareProviderTest {
         }
     }
 
+    @Test fun emptyOrNonJsonWriteIsRetryableAndSuccessFalseIsNot() = runBlocking {
+        for (body in listOf("", "OK", "null", "[]", """{"result":{"id":"x"}}""")) {
+            MockWebServer().use { server ->
+                server.enqueue(MockResponse().setBody(records()))
+                server.enqueue(MockResponse().setResponseCode(200).setBody(body))
+                val failed = provider(server).apply("203.0.113.1", null, config) as DdnsResult.Failed
+                assertTrue(body, failed.retryable)
+                assertFalse(failed.message.contains(token))
+            }
+        }
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody(records()))
+            server.enqueue(MockResponse().setResponseCode(200).setBody("""{"success":false}"""))
+            val failed = provider(server).apply("203.0.113.1", null, config) as DdnsResult.Failed
+            assertFalse(failed.retryable)
+        }
+    }
+
+    @Test fun doesNotFollowRedirects() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(
+                MockResponse().setResponseCode(302).addHeader("Location", server.url("/stolen").toString()),
+            )
+            server.enqueue(MockResponse().setBody("""{"success":true,"result":[]}"""))
+            val failed = provider(server).apply("203.0.113.1", null, config) as DdnsResult.Failed
+            assertFalse(failed.retryable)
+            assertEquals(1, server.requestCount)
+        }
+    }
+
     @Test fun factoryLeavesUnimplementedProvidersUnsupported() = runBlocking {
         val http = OkHttpClient()
         assertTrue(DdnsProviders.of(DdnsProviderId.CLOUDFLARE, http) is CloudflareProvider)

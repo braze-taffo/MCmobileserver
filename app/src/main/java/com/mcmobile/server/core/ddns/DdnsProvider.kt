@@ -2,6 +2,10 @@ package com.mcmobile.server.core.ddns
 
 import okhttp3.OkHttpClient
 
+internal fun OkHttpClient.noRedirects(): OkHttpClient =
+    if (!this.followRedirects && !this.followSslRedirects) this
+    else newBuilder().followRedirects(false).followSslRedirects(false).build()
+
 interface DdnsProvider {
     val id: DdnsProviderId
     suspend fun apply(ipv4: String?, ipv6: String?, config: DdnsConfig): DdnsResult

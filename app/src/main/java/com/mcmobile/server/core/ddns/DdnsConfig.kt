@@ -19,10 +19,21 @@ data class DdnsConfig(
     val token: String = "",
 ) {
     fun fingerprint(): String {
-        val digest = MessageDigest.getInstance("SHA-256").digest(token.toByteArray(Charsets.UTF_8))
-        val tokenHash = digest.joinToString("") { "%02x".format(it) }.take(16)
-        return listOf(provider.name, hostname, cloudflareRecord, duckSubdomain, webhookUrl, tokenHash)
+        return listOf(provider.name, hostname, cloudflareRecord, duckSubdomain, webhookFingerprintPart(), sha16(token))
             .joinToString("|")
+    }
+
+    /** Host hash plus a hash of the full URL. The query string, which often holds the secret, stays out. */
+    private fun webhookFingerprintPart(): String {
+        if (webhookUrl.isEmpty()) return ""
+        val host = webhookUrl.substringAfter("://", webhookUrl)
+            .substringBefore('/')
+            .substringBefore('?')
+            .substringBefore('#')
+            .substringAfter('@')
+            .substringBefore(':')
+            .lowercase()
+        return sha16(host) + sha16(webhookUrl)
     }
 
     fun validate() {
@@ -59,6 +70,11 @@ data class DdnsConfig(
     }
 
     companion object {
+        private fun sha16(text: String): String {
+            val digest = MessageDigest.getInstance("SHA-256").digest(text.toByteArray(Charsets.UTF_8))
+            return digest.joinToString("") { "%02x".format(it) }.take(16)
+        }
+
         fun dnsHostname(value: String): Boolean {
             if (value.isBlank() || value.length > 253 || value.startsWith(".") || value.endsWith(".")) return false
             return value.split('.').all { label ->

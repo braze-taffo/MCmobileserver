@@ -16,13 +16,16 @@ class WebhookProvider(private val http: OkHttpClient) : DdnsProvider {
     override suspend fun apply(ipv4: String?, ipv6: String?, config: DdnsConfig): DdnsResult = withContext(Dispatchers.IO) {
         val url = expand(config.webhookUrl, ipv4, ipv6)
             ?: return@withContext DdnsResult.Failed("Webhook 地址无效", retryable = false)
-        val client = http.newBuilder().followRedirects(false).followSslRedirects(false).build()
+        val client = http.noRedirects()
         try {
             client.newCall(Request.Builder().url(url).get().build()).execute().use { response ->
                 when (response.code) {
                     in 200..299 -> DdnsResult.Updated(ipv4, ipv6, "Webhook 已调用")
                     401, 403 -> DdnsResult.Failed("Webhook 凭据被拒绝（${response.code}）", retryable = false)
-                    else -> DdnsResult.Failed("Webhook 请求失败（${response.code}）", retryable = response.code == 429 || response.code >= 500 || response.code in 300..399)
+                    else -> DdnsResult.Failed(
+                        "Webhook 请求失败（${response.code}）",
+                        retryable = response.code == 429 || response.code >= 500,
+                    )
                 }
             }
         } catch (e: CancellationException) {

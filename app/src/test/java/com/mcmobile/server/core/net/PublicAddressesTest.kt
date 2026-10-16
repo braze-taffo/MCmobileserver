@@ -14,27 +14,68 @@ class PublicAddressesTest {
         return if (iface == null) raw else Inet6Address.getByAddress(iface, raw.address, 2)
     }
 
-    @Test fun pickIpv6PrefersStableGlobalThenAnyGlobalThenUla() {
-        val link = v6("fe80::1")
-        val ula = v6("fd12:3456::1")
-        val temp = v6("2001:db8::aa")
-        val stable = v6("2001:db8::1")
-        val deprecated = v6("2001:db8::dead")
-        assertEquals(PublicAddresses.hostOf(stable), PublicAddresses.pickIpv6(listOf(link, ula, temp, stable), isTemporary = { it == temp }))
-        assertEquals(
-            PublicAddresses.hostOf(temp),
-            PublicAddresses.pickIpv6(listOf(temp, deprecated), isTemporary = { it == temp }, isDeprecated = { it == deprecated }),
+    private fun cand(host: String, flags: Int = 0) = Ipv6Candidate(v6(host), flags)
+
+    @Test fun pickIpv6KeepsStableGlobalAndDropsFlagsAndUla() {
+        val stable = cand("2001:db8::1")
+        val picked = PublicAddresses.pickIpv6(
+            listOf(
+                cand("fe80::1"),
+                cand("fd12:3456::1"),
+                cand("fc00::1"),
+                cand("2001:db8::aa", Ipv6AddressFlags.TEMPORARY),
+                cand("2001:db8::dead", Ipv6AddressFlags.DEPRECATED),
+                cand("2001:db8::777", Ipv6AddressFlags.TENTATIVE),
+                cand("2001:db8::bad", Ipv6AddressFlags.TEMPORARY or Ipv6AddressFlags.DEPRECATED),
+                stable,
+            ),
         )
-        assertEquals(PublicAddresses.hostOf(ula), PublicAddresses.pickIpv6(listOf(link, ula)))
-        assertNull(PublicAddresses.pickIpv6(listOf(link)))
+        assertEquals(PublicAddresses.hostOf(stable.address), picked)
+        assertNull(
+            PublicAddresses.pickIpv6(
+                listOf(
+                    cand("2001:db8::aa", Ipv6AddressFlags.TEMPORARY),
+                    cand("2001:db8::dead", Ipv6AddressFlags.DEPRECATED),
+                    cand("2001:db8::777", Ipv6AddressFlags.TENTATIVE),
+                ),
+            ),
+        )
+        assertNull(PublicAddresses.pickIpv6(listOf(cand("fe80::1"), cand("fd12:3456::1"))))
+        assertNull(PublicAddresses.pickIpv6(listOf(cand("fe80::1"))))
+        assertNotEquals(0, Ipv6AddressFlags.TEMPORARY)
+        assertNotEquals(0, Ipv6AddressFlags.DEPRECATED)
+        assertNotEquals(0, Ipv6AddressFlags.TENTATIVE)
+        // android.jar leaves these at 0. A non-zero stub value must still be the kernel bit we filter on.
+        val os = listOf(
+            Ipv6AddressFlags.TEMPORARY to android.system.OsConstants.IFA_F_TEMPORARY,
+            Ipv6AddressFlags.DEPRECATED to android.system.OsConstants.IFA_F_DEPRECATED,
+            Ipv6AddressFlags.TENTATIVE to android.system.OsConstants.IFA_F_TENTATIVE,
+        )
+        for ((ours, platform) in os) {
+            if (platform != 0) assertEquals(ours, platform)
+        }
     }
 
     @Test fun pickIpv6StripsZoneSuffix() {
         val scoped = v6("2001:db8::1", iface = "wlan0")
         assertTrue(scoped.hostAddress!!.contains("%"))
-        val picked = PublicAddresses.pickIpv6(listOf(scoped))
+        val picked = PublicAddresses.pickIpv6(listOf(Ipv6Candidate(scoped)))
         assertEquals(PublicAddresses.hostOf(scoped), picked)
         assertFalse(picked!!.contains("%"))
+    }
+
+    @Test fun sanitizeDropsUlaAndKeepsGlobalText() {
+        val kept = PublicAddresses.sanitize(PublicEndpoints("203.0.113.10", "2001:db8::9"))
+        assertEquals("203.0.113.10", kept.ipv4)
+        assertEquals("2001:db8::9", kept.ipv6)
+        val ula = PublicAddresses.sanitize(PublicEndpoints(null, "fd12:3456::1"))
+        assertNull(ula.ipv4)
+        assertNull(ula.ipv6)
+        val local = PublicAddresses.sanitize(PublicEndpoints("10.1.1.1", "fe80::1"))
+        assertNull(local.ipv4)
+        assertNull(local.ipv6)
+        assertNull(PublicAddresses.publishableIpv6("fc00::5"))
+        assertEquals("2001:db8::9", PublicAddresses.publishableIpv6("2001:db8::9%2"))
     }
 
     @Test fun parsePublicIpv4RejectsPrivateLoopbackAndIpv6Text() {

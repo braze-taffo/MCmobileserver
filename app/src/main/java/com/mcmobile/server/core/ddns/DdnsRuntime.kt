@@ -2,15 +2,15 @@ package com.mcmobile.server.core.ddns
 
 import android.content.Context
 import android.net.ConnectivityManager
+import android.net.Network
 import android.net.NetworkCapabilities
 import com.mcmobile.server.core.console.ConsoleSession
 import com.mcmobile.server.core.files.ManagedFiles
+import com.mcmobile.server.core.net.Ipv6Candidate
 import com.mcmobile.server.core.net.PublicAddresses
 import com.mcmobile.server.core.net.PublicEndpoints
 import java.io.File
 import java.net.Inet6Address
-import java.net.InetAddress
-import java.net.NetworkInterface
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -299,7 +299,8 @@ object DdnsRuntime {
         nics: () -> List<Inet6Address>,
         detect: (List<Inet6Address>) -> PublicEndpoints,
     ): PublicEndpoints = try {
-        detect(nics())
+        // ULA and other non-routable addresses are not public. They must not skip the empty-address backoff.
+        PublicAddresses.sanitize(detect(nics()))
     } catch (e: CancellationException) {
         throw e
     } catch (_: Exception) {
@@ -313,6 +314,8 @@ object DdnsRuntime {
     }.getOrNull() ?: "dev"
 
     private fun httpClient() = OkHttpClient.Builder()
+        .followRedirects(false)
+        .followSslRedirects(false)
         .connectTimeout(5, TimeUnit.SECONDS)
         .readTimeout(5, TimeUnit.SECONDS)
         .callTimeout(8, TimeUnit.SECONDS)
@@ -321,29 +324,38 @@ object DdnsRuntime {
 
 private const val idleMs = 3_000L
 
+/**
+ * IPv6 comes from `LinkProperties.linkAddresses`, whose flags are the kernel `IFA_F_*` bits.
+ * Temporary, deprecated, and tentative addresses are dropped. No global unicast means no AAAA.
+ * A VPN active network is not used; the underlying non-VPN network is. There is no unfiltered
+ * interface scan, which would publish a privacy or ULA address.
+ */
 internal fun nicsFromConnectivity(context: Context): List<Inet6Address> {
     val cm = runCatching { context.getSystemService(ConnectivityManager::class.java) }.getOrNull()
-        ?: return everyInet6()
-    val network = runCatching { cm.activeNetwork }.getOrNull() ?: return everyInet6()
-    val caps = runCatching { cm.getNetworkCapabilities(network) }.getOrNull()
-    if (caps?.hasTransport(NetworkCapabilities.TRANSPORT_VPN) == true) return everyInet6()
-    val name = runCatching { cm.getLinkProperties(network)?.interfaceName }.getOrNull()
-    if (name.isNullOrBlank()) return everyInet6()
-    val iface = runCatching { NetworkInterface.getByName(name) }.getOrNull() ?: return everyInet6()
-    val addrs = iface.inetAddresses?.toList().orEmpty().filterIsInstance<Inet6Address>()
-    val picked = PublicAddresses.pickIpv6(addrs)
-    if (picked == null || !isGlobalUnicast(picked)) return everyInet6()
-    return addrs
+        ?: return emptyList()
+    val candidates = runCatching { ipv6Candidates(cm) }.getOrDefault(emptyList())
+    val chosen = PublicAddresses.pickIpv6(candidates) ?: return emptyList()
+    return listOfNotNull(candidates.firstOrNull { PublicAddresses.hostOf(it.address) == chosen }?.address)
 }
 
-private fun isGlobalUnicast(host: String): Boolean {
-    val addr = runCatching { InetAddress.getByName(host) }.getOrNull() as? Inet6Address ?: return false
-    val top = addr.address[0].toInt() and 0xff
-    return top in 0x20..0x3f
+private fun ipv6Candidates(cm: ConnectivityManager): List<Ipv6Candidate> {
+    return networksForAddresses(cm).flatMap { network ->
+        val links = runCatching { cm.getLinkProperties(network)?.linkAddresses }.getOrNull().orEmpty()
+        links.mapNotNull { link ->
+            val addr = link.address as? Inet6Address ?: return@mapNotNull null
+            Ipv6Candidate(addr, link.flags)
+        }
+    }
 }
 
-private fun everyInet6(): List<Inet6Address> = runCatching {
-    NetworkInterface.getNetworkInterfaces()?.toList().orEmpty()
-        .flatMap { it.inetAddresses?.toList().orEmpty() }
-        .filterIsInstance<Inet6Address>()
-}.getOrDefault(emptyList())
+@Suppress("DEPRECATION") // getAllNetworks is the list API still available since the min SDK.
+private fun networksForAddresses(cm: ConnectivityManager): List<Network> {
+    val active = runCatching { cm.activeNetwork }.getOrNull() ?: return emptyList()
+    val caps = runCatching { cm.getNetworkCapabilities(active) }.getOrNull()
+    if (caps?.hasTransport(NetworkCapabilities.TRANSPORT_VPN) != true) return listOf(active)
+    return runCatching { cm.allNetworks.toList() }.getOrDefault(emptyList()).filter { network ->
+        val networkCaps = runCatching { cm.getNetworkCapabilities(network) }.getOrNull() ?: return@filter false
+        networkCaps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
+            !networkCaps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)
+    }
+}

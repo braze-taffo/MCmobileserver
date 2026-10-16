@@ -9,6 +9,25 @@ import okhttp3.Request
 
 data class PublicEndpoints(val ipv4: String?, val ipv6: String?)
 
+/** One IPv6 address plus the kernel `ifa_flags` from `LinkAddress.getFlags()`. */
+data class Ipv6Candidate(
+    val address: Inet6Address,
+    val flags: Int = 0,
+)
+
+/**
+ * Kernel `if_addr.h` bits. These match `android.system.OsConstants.IFA_F_*` on a device.
+ * The android.jar stubs initialize those fields to 0, so the filter must not read them.
+ */
+object Ipv6AddressFlags {
+    const val TEMPORARY = 0x01
+    const val DEPRECATED = 0x20
+    const val TENTATIVE = 0x40
+    const val UNUSABLE = TEMPORARY or DEPRECATED or TENTATIVE
+
+    fun unusable(flags: Int): Boolean = flags and UNUSABLE != 0
+}
+
 object PublicAddresses {
     val DEFAULT_ECHO_URLS = listOf(
         "https://api4.ipify.org",
@@ -33,19 +52,31 @@ object PublicAddresses {
         return addr.hostAddress
     }
 
-    fun pickIpv6(
-        nics: List<Inet6Address>,
-        isTemporary: (Inet6Address) -> Boolean = { temporaryOf(it) },
-        isDeprecated: (Inet6Address) -> Boolean = { deprecatedOf(it) },
-    ): String? {
-        val usable = nics.filterNot(::excluded)
-        val global = usable.filter(::globalUnicast)
-        val pick = global.firstOrNull { !isTemporary(it) && !isDeprecated(it) }
-            ?: global.firstOrNull { !isDeprecated(it) }
-            ?: global.firstOrNull()
-            ?: usable.firstOrNull(::ula)
-        val host = pick?.let(::hostOf).orEmpty()
-        return host.ifEmpty { null }
+    /**
+     * Global unicast only. Drops temporary, deprecated, and tentative flags, and never
+     * returns ULA (`fc00::/7`). No usable global address yields null.
+     */
+    fun pickIpv6(candidates: List<Ipv6Candidate>): String? {
+        val pick = candidates.firstOrNull { candidate ->
+            !Ipv6AddressFlags.unusable(candidate.flags) &&
+                !excluded(candidate.address) &&
+                globalUnicast(candidate.address)
+        } ?: return null
+        return hostOf(pick.address).ifEmpty { null }
+    }
+
+    /** Keep a public IPv4 and a global unicast IPv6. ULA and other non-routable text become null. */
+    fun sanitize(endpoints: PublicEndpoints): PublicEndpoints = PublicEndpoints(
+        ipv4 = endpoints.ipv4?.let(::parsePublicIpv4),
+        ipv6 = publishableIpv6(endpoints.ipv6),
+    )
+
+    fun publishableIpv6(host: String?): String? {
+        if (host.isNullOrBlank()) return null
+        val bare = host.substringBefore('%').trim()
+        val addr = runCatching { InetAddress.getByName(bare) }.getOrNull() as? Inet6Address ?: return null
+        if (excluded(addr) || !globalUnicast(addr)) return null
+        return bare
     }
 
     fun detect(
@@ -53,10 +84,8 @@ object PublicAddresses {
         nics: List<Inet6Address>,
         echoUrls: List<String> = DEFAULT_ECHO_URLS,
         userAgent: String = userAgent(),
-        isTemporary: (Inet6Address) -> Boolean = { temporaryOf(it) },
-        isDeprecated: (Inet6Address) -> Boolean = { deprecatedOf(it) },
     ): PublicEndpoints {
-        val ipv6 = pickIpv6(nics, isTemporary, isDeprecated)
+        val ipv6 = pickIpv6(nics.map { Ipv6Candidate(it) })
         val client = http.newBuilder()
             .connectTimeout(5, TimeUnit.SECONDS)
             .readTimeout(5, TimeUnit.SECONDS)
@@ -94,12 +123,4 @@ object PublicAddresses {
         val top = addr.address[0].toInt() and 0xff
         return top in 0x20..0x3f
     }
-
-    private fun ula(addr: Inet6Address): Boolean = (addr.address[0].toInt() and 0xfe) == 0xfc
-
-    private fun temporaryOf(addr: Inet6Address): Boolean =
-        runCatching { addr.javaClass.getMethod("isTemporary").invoke(addr) as Boolean }.getOrDefault(false)
-
-    private fun deprecatedOf(addr: Inet6Address): Boolean =
-        runCatching { addr.javaClass.getMethod("isDeprecated").invoke(addr) as Boolean }.getOrDefault(false)
 }

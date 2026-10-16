@@ -285,6 +285,46 @@ class DdnsRuntimeTest {
         assertFalse(out.contains("hooks.example"))
     }
 
+    @Test fun ulaDoesNotDisableEmptyAddressBackoff() = runBlocking {
+        val applies = AtomicInteger()
+        val sleeps = mutableListOf<Long>()
+        var now = 0L
+        val job = runLoop(
+            scope(),
+            webhook(),
+            applies = applies,
+            detect = { PublicEndpoints(null, "fd12:3456::1") },
+            clock = { now },
+            sleep = { ms ->
+                sleeps += ms
+                now += ms
+            },
+            maxLoops = 3,
+        )
+        withTimeout(5_000) { job.join() }
+        assertEquals(0, applies.get())
+        assertEquals(DdnsUpdater.DELAYS.toList(), sleeps)
+        assertEquals("没有探测到公网地址", DdnsRuntime.state.value.lastError)
+    }
+
+    @Test fun publicIpv4StillUpdatesWhenIpv6IsUla() = runBlocking {
+        val applies = AtomicInteger()
+        var seen: Pair<String?, String?>? = null
+        val provider = counting(applies) { v4, v6 ->
+            seen = v4 to v6
+            DdnsResult.Updated(v4, v6, "ok")
+        }
+        val job = runLoop(
+            scope(),
+            webhook(),
+            provider = provider,
+            detect = { PublicEndpoints("203.0.113.8", "fc00::5") },
+        )
+        withTimeout(5_000) { job.join() }
+        assertEquals(1, applies.get())
+        assertEquals("203.0.113.8" to null, seen)
+    }
+
     @Test fun writeLogRotatesPastLimit() {
         val dir = java.nio.file.Files.createTempDirectory("ddns-log").toFile()
         try {

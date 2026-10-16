@@ -107,6 +107,7 @@ class WebhookProviderTest {
                 config("https://ddns.example/hook?ip={ip}"),
             ) as DdnsResult.Failed
             assertTrue(failed.message.contains("302"))
+            assertFalse(failed.retryable)
             assertFalse(failed.message.contains(token))
             assertEquals(1, server.requestCount)
         }

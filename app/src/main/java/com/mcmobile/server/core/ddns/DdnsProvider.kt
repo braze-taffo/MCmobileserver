@@ -1,0 +1,23 @@
+package com.mcmobile.server.core.ddns
+
+import okhttp3.OkHttpClient
+
+interface DdnsProvider {
+    val id: DdnsProviderId
+    suspend fun apply(ipv4: String?, ipv6: String?, config: DdnsConfig): DdnsResult
+}
+
+sealed interface DdnsResult {
+    data class Updated(val ipv4: String?, val ipv6: String?, val detail: String) : DdnsResult
+    data class Unchanged(val reason: String) : DdnsResult
+    data class Failed(val message: String, val retryable: Boolean = true) : DdnsResult
+    data object Unsupported : DdnsResult
+}
+
+class StubDdnsProvider(override val id: DdnsProviderId) : DdnsProvider {
+    override suspend fun apply(ipv4: String?, ipv6: String?, config: DdnsConfig): DdnsResult = DdnsResult.Unsupported
+}
+
+object DdnsProviders {
+    fun of(id: DdnsProviderId, http: OkHttpClient): DdnsProvider = StubDdnsProvider(id)
+}

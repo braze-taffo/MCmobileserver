@@ -148,7 +148,10 @@ fun HomeScreen(vm: AppViewModel, nav: NavController) {
                     Spacer(Modifier.weight(1f))
                     TextButton(onClick = { nav.navigate(Routes.PACK_IMPORT) }) { Text("导入整包", color = MaterialTheme.colorScheme.onPrimary) }
                     TextButton(onClick = { nav.navigate(Routes.FRP) }) {
-                        Text("内网穿透", color = MaterialTheme.colorScheme.onPrimary)
+                        Text("穿透", color = MaterialTheme.colorScheme.onPrimary)
+                    }
+                    TextButton(onClick = { nav.navigate(Routes.DDNS) }) {
+                        Text("域名", color = MaterialTheme.colorScheme.onPrimary)
                     }
                     IconButton(onClick = { nav.navigate(Routes.SETTINGS) }) {
                         Icon(Icons.Default.Settings, "设置",

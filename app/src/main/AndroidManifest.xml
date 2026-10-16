@@ -3,6 +3,7 @@
     xmlns:tools="http://schemas.android.com/tools">
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
@@ -47,7 +48,7 @@
 
         <!-- JVM 在独立进程中运行，崩溃与 UI 进程互相隔离 -->
         <service android:name="com.mcmobile.server.service.ManagementService" android:exported="false" android:foregroundServiceType="specialUse">
-            <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE" android:value="Maintains user-configured backup, restart and command tasks while a Minecraft server is running" />
+            <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE" android:value="Maintains user-configured backup, restart, command and dynamic DNS tasks while a Minecraft server is running" />
         </service>
         <service
             android:name="com.mcmobile.server.service.FrpService"

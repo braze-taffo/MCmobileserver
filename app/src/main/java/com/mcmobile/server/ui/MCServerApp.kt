@@ -22,6 +22,7 @@ object Routes {
     const val SETTINGS = "settings"
     const val CUSTOM_APK = "custom-apk"
     const val FRP = "frp"
+    const val DDNS = "ddns"
     const val PACK_IMPORT = "pack-import"
     const val MANAGE = "manage/{id}"
     const val PLAYERS = "players/{id}"
@@ -77,6 +78,7 @@ fun MCServerApp(vm: AppViewModel = viewModel(), updates: UpdateViewModel = viewM
         composable(Routes.SETTINGS) { SettingsScreen(vm, nav, updates) }
         composable(Routes.CUSTOM_APK) { com.mcmobile.server.ui.settings.CustomApkScreen(nav) }
         composable(Routes.FRP) { com.mcmobile.server.ui.frp.FrpScreen(nav) }
+        composable(Routes.DDNS) { com.mcmobile.server.ui.ddns.DdnsScreen(nav) }
         listOf(Routes.MANAGE, Routes.PLAYERS, Routes.ADDONS, Routes.WORLDS, Routes.LOGS, Routes.TASKS).forEach { route ->
             composable(route) { entry ->
                 val instance = instances.firstOrNull { it.id == entry.arguments?.getString("id") }

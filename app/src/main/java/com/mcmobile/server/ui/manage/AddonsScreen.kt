@@ -151,6 +151,7 @@ fun AddonsScreen(vm: AppViewModel, instance: ServerInstance, nav: NavController)
                                 Text(if (addon.enabled) "启用" else "禁用", color = if (addon.enabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
                             }
                             Text("${addon.version ?: "版本未知"}${addon.id?.let { " · $it" } ?: ""}", style = MaterialTheme.typography.bodySmall)
+                            addon.description?.takeIf { it.isNotBlank() }?.let { Text(it, maxLines = 3, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall) }
                             Text(addon.file.name, maxLines = 2, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall)
                             Row {
                                 TextButton(enabled = !state.busy, onClick = { state.work {

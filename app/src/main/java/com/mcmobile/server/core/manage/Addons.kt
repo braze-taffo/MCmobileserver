@@ -14,7 +14,7 @@ import java.util.concurrent.TimeUnit
 import java.util.jar.JarFile
 
 object Addons {
-    data class Local(val file: File, val id: String?, val name: String, val version: String?, val enabled: Boolean)
+    data class Local(val file: File, val id: String?, val name: String, val version: String?, val enabled: Boolean, val description: String? = null)
     data class Hit(val id: String, val title: String, val description: String, val downloads: Long)
     data class SearchPage(val hits: List<Hit>, val total: Int, val offset: Int) {
         val hasNext: Boolean get() = offset + hits.size < total
@@ -37,7 +37,7 @@ object Addons {
         val dir = ManagedFiles(root).child(root, directory(type))
         return dir.listFiles().orEmpty().filter { it.isFile && (it.name.endsWith(".jar", true) || it.name.endsWith(".jar.disabled", true)) }.map { file ->
             ManagedFiles(root).checked(file)
-            var id: String? = null; var name = file.name.removeSuffix(".disabled").removeSuffix(".jar"); var version: String? = null
+            var id: String? = null; var name = file.name.removeSuffix(".disabled").removeSuffix(".jar"); var version: String? = null; var description: String? = null
             runCatching { JarFile(file).use { jar ->
                 fun read(path: String): String? = jar.getJarEntry(path)?.takeIf { it.size <= 1048576 }?.let { entry ->
                     jar.getInputStream(entry).use { input ->
@@ -49,13 +49,20 @@ object Addons {
                             if (output.size() + count > 1048576) return@use null
                             output.write(buffer, 0, count)
                         }
-                        output.toString("UTF-8")
+                        ModMetadataText.decode(output.toByteArray())
                     }
                 }
+                fun JsonObject.string(key: String): String? = (this[key] as? JsonPrimitive)?.contentOrNull?.takeIf { it.isNotBlank() }
                 val fabric = read("fabric.mod.json")?.let { json.parseToJsonElement(it).jsonObject }
+                val quilt = if (fabric == null) read("quilt.mod.json")?.let { json.parseToJsonElement(it).jsonObject } else null
                 if (fabric != null) {
-                    id = fabric["id"]?.jsonPrimitive?.content; name = fabric["name"]?.jsonPrimitive?.content ?: name
-                    version = fabric["version"]?.jsonPrimitive?.content
+                    id = fabric.string("id"); name = fabric.string("name") ?: name
+                    version = fabric.string("version"); description = fabric.string("description")
+                } else if (quilt != null) {
+                    val loader = quilt["quilt_loader"] as? JsonObject
+                    val meta = loader?.get("metadata") as? JsonObject
+                    id = loader?.string("id"); name = meta?.string("name") ?: name
+                    version = loader?.string("version"); description = meta?.string("description")
                 } else {
                     val toml = read("META-INF/neoforge.mods.toml") ?: read("META-INF/mods.toml")
                     val yaml = read("paper-plugin.yml") ?: read("plugin.yml")
@@ -65,10 +72,11 @@ object Addons {
                     id = field(toml, "modId", "=") ?: field(yaml, "name", ":")
                     name = field(toml, "displayName", "=") ?: field(yaml, "name", ":") ?: name
                     version = field(toml, "version", "=")?.takeUnless { it.contains('$') } ?: field(yaml, "version", ":")
+                    description = field(toml, "description", "=") ?: field(yaml, "description", ":")
                 }
                 version = version ?: jar.manifest?.mainAttributes?.getValue("Implementation-Version")
             } }
-            Local(file, id, name, version, !file.name.endsWith(".disabled", true))
+            Local(file, id, name, version, !file.name.endsWith(".disabled", true), description)
         }.sortedBy { it.name.lowercase() }
     }
     private fun get(path: String, query: Map<String, String> = emptyMap(), allowMissing: Boolean = false): JsonElement? {

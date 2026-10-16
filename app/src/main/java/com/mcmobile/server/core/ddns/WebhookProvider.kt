@@ -2,7 +2,6 @@ package com.mcmobile.server.core.ddns
 
 import java.io.IOException
 import java.net.URLEncoder
-import java.nio.charset.StandardCharsets
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -47,6 +46,6 @@ class WebhookProvider(private val http: OkHttpClient) : DdnsProvider {
         }
 
         private fun encode(value: String): String =
-            URLEncoder.encode(value, StandardCharsets.UTF_8).replace("+", "%20")
+            URLEncoder.encode(value, "UTF-8").replace("+", "%20")
     }
 }

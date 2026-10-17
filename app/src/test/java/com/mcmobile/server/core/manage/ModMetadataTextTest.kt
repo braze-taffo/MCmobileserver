@@ -49,6 +49,35 @@ class ModMetadataTextTest {
         assertEquals(chinese, ModMetadataText.decode(bom + chinese.toByteArray(StandardCharsets.UTF_8)))
     }
 
+    @Test fun multipleWesternAccentsDoNotPassUsingFileWideCounts() {
+        listOf("ISO-8859-1", "windows-1252").forEach { encoding ->
+            listOf("""{"name":"für schöne Größe"}""", """{"name":"Übermod","description":"für schöne Größe, très élégant"}""").forEach { text ->
+                val bytes = text.toByteArray(Charset.forName(encoding))
+                val decoded = ModMetadataText.decode(bytes)
+                assertEquals(String(bytes, StandardCharsets.UTF_8), decoded)
+                assertFalse(decoded.any { it in '\u4E00'..'\u9FFF' })
+            }
+        }
+    }
+
+    @Test fun gb18030FourByteChineseRoundTrips() {
+        val text = """{"name":"中文𠀀模组","description":"扩展汉字𠮷"}"""
+        assertEquals(text, ModMetadataText.decode(text.toByteArray(Charset.forName("GB18030"))))
+    }
+
+    @Test fun malformedLegacySequencesUseUtf8Replacement() {
+        listOf(byteArrayOf(0x81.toByte()), byteArrayOf(0x81.toByte(), 0x30),
+            byteArrayOf(0x81.toByte(), 0x30, 0x81.toByte()), byteArrayOf(0xFF.toByte(), 0xFF.toByte())).forEach { bytes ->
+            assertEquals(String(bytes, StandardCharsets.UTF_8), ModMetadataText.decode(bytes))
+        }
+    }
+
+    @Test fun ambiguousGbkAsciiTrailUsesConservativeFallbackEvenBesideChinese() {
+        // 丂 is GBK 81 40. Like a Western accent followed by ASCII, it is ambiguous.
+        val bytes = "中文丂".toByteArray(Charset.forName("GBK"))
+        assertEquals(String(bytes, StandardCharsets.UTF_8), ModMetadataText.decode(bytes))
+    }
+
     @Test fun utf16BeBomDecodes() {
         val bom = byteArrayOf(0xFE.toByte(), 0xFF.toByte())
         assertEquals(chinese, ModMetadataText.decode(bom + chinese.toByteArray(StandardCharsets.UTF_16BE)))

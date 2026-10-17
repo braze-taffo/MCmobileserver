@@ -21,24 +21,40 @@ object ModMetadataText {
     }
 
     /**
-     * GB18030/GBK is only a fallback for Chinese metadata. A Latin-1 high byte
-     * paired with an ASCII trail (Über → U+8EA1) is one high byte per hanzi;
-     * common GBK uses two. Reject the one-byte shape and keep UTF-8 replacement.
+     * GB18030/GBK is only a conservative fallback for Chinese metadata. Western
+     * accents followed by ASCII can also be legal GBK, so reject those ambiguous
+     * two-byte sequences individually. Genuine GBK with ASCII trail bytes also
+     * takes the UTF-8 replacement path; encoding cannot be inferred with certainty.
      */
     private fun decodeLegacyChinese(bytes: ByteArray): String? {
         for (name in arrayOf("GB18030", "GBK")) {
             val charset = charsetOrNull(name) ?: continue
             val decoded = decodeStrict(bytes, charset) ?: continue
-            if (looksLikeDoubleByteChinese(bytes, decoded)) return decoded
+            if (hasConservativeChineseSequences(bytes, decoded)) return decoded
         }
         return null
     }
 
-    private fun looksLikeDoubleByteChinese(bytes: ByteArray, text: String): Boolean {
-        val cjk = text.count { it in '\u3400'..'\u4DBF' || it in '\u4E00'..'\u9FFF' || it in '\uF900'..'\uFAFF' }
-        if (cjk == 0) return false
-        val nonAscii = bytes.count { (it.toInt() and 0xFF) >= 0x80 }
-        return nonAscii > cjk
+    private fun hasConservativeChineseSequences(bytes: ByteArray, text: String): Boolean {
+        fun byteAt(index: Int): Int = if (index < bytes.size) bytes[index].toInt() and 0xFF else -1
+        var pos = 0
+        while (pos < bytes.size) {
+            val lead = byteAt(pos)
+            if (lead < 0x80) {
+                pos++
+                continue
+            }
+            if (lead !in 0x81..0xFE) return false
+            val trail = byteAt(pos + 1)
+            if (trail in 0x30..0x39) {
+                if (byteAt(pos + 2) !in 0x81..0xFE || byteAt(pos + 3) !in 0x30..0x39) return false
+                pos += 4
+            } else {
+                if (trail !in 0x80..0xFE) return false
+                pos += 2
+            }
+        }
+        return text.codePoints().anyMatch { Character.UnicodeScript.of(it) == Character.UnicodeScript.HAN }
     }
 
     private fun bomCharset(bytes: ByteArray): Charset? = when {

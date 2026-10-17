@@ -85,6 +85,83 @@ class AddonLocalMetadataTest {
         assertNull(addon.description)
     }
 
+    @Test fun forgeAndNeoForgeMultilineLiteralDescriptions() {
+        listOf("META-INF/mods.toml" to ServerType.FORGE, "META-INF/neoforge.mods.toml" to ServerType.NEOFORGE).forEach { (path, type) ->
+            val toml = "[[mods]]\r\nmodId='multiline'\r\nversion='1.2'\r\ndisplayName='中文模组'\r\n" +
+                "description = '''\r\n第一行包含 '单引号' 和 \"双引号\"。\r\n第二行保留 \\n 字面量。\r\n''' # comment\r\n" +
+                "[[dependencies.multiline]]\r\nmodId='minecraft'"
+            val addon = localJar("literal.jar", mapOf(path to toml.toByteArray()), type)
+            assertEquals("第一行包含 '单引号' 和 \"双引号\"。\n第二行保留 \\n 字面量。\n", addon.description)
+            assertEquals("multiline", addon.id)
+            assertEquals("中文模组", addon.name)
+            assertEquals("1.2", addon.version)
+        }
+    }
+
+    @Test fun forgeMultilineBasicDescriptionDecodesEscapesAndContinuation() {
+        val toml = "[[mods]]\nmodId='basic'\ndescription = \"\"\"\n中文 \\" +
+            "\n    续行\\n\\\"引号\\\"，Unicode: \\u4E2D\\U00020000\n\"\"\"\n"
+        val addon = localJar("basic.jar", mapOf("META-INF/mods.toml" to toml.toByteArray()), ServerType.FORGE)
+        assertEquals("中文 续行\n\"引号\"，Unicode: 中𠀀\n", addon.description)
+    }
+
+    @Test fun forgeSingleLineQuotedDescriptionKeepsApostrophesAndIgnoresComments() {
+        val toml = "[[mods]]\nmodId='single'\ndescription = \"It's a \\\"中文\\\" mod #1\" # outside comment"
+        val addon = localJar("single.jar", mapOf("META-INF/mods.toml" to toml.toByteArray()), ServerType.FORGE)
+        assertEquals("It's a \"中文\" mod #1", addon.description)
+    }
+
+    @Test fun pluginCommandDescriptionIsNotUsedAsPluginDescription() {
+        listOf("plugin.yml", "paper-plugin.yml").forEach { path ->
+            val yaml = "name: Example\nversion: '2.1'\ncommands:\n  help:\n    description: 命令帮助\n"
+            val addon = localJar("commands.jar", mapOf(path to yaml.toByteArray()), ServerType.PAPER)
+            assertEquals("Example", addon.name)
+            assertEquals("2.1", addon.version)
+            assertNull(addon.description)
+        }
+    }
+
+    @Test fun pluginTopLevelDescriptionWinsEvenAfterCommands() {
+        val yaml = "name: Example\ncommands:\n  help:\n    description: 命令帮助\ndescription: 插件说明\n"
+        val addon = localJar("plugin.jar", mapOf("plugin.yml" to yaml.toByteArray()), ServerType.PAPER)
+        assertEquals("插件说明", addon.description)
+    }
+
+    @Test fun unusableQuiltMetadataDoesNotBlockTomlYamlOrManifest() {
+        listOf("{broken", "[]", "null", "{}", "{\"quilt_loader\":[]}", "{\"quilt_loader\":{}}").forEach { quilt ->
+            val invalid = mapOf("quilt.mod.json" to quilt.toByteArray())
+            listOf("META-INF/mods.toml" to ServerType.FORGE, "META-INF/neoforge.mods.toml" to ServerType.NEOFORGE).forEach { (path, type) ->
+                val toml = "[[mods]]\nmodId='fallback'\nversion='3.1'\ndisplayName='中文模组'\ndescription='模组说明'\n"
+                val addon = localJar("fallback.jar", invalid + (path to toml.toByteArray()), type)
+                assertEquals("fallback", addon.id)
+                assertEquals("中文模组", addon.name)
+                assertEquals("3.1", addon.version)
+                assertEquals("模组说明", addon.description)
+            }
+            val yaml = "name: 中文插件\nversion: '4.2'\ndescription: 插件说明\n"
+            val plugin = localJar("plugin.jar", invalid + ("plugin.yml" to yaml.toByteArray()), ServerType.PAPER)
+            assertEquals("中文插件", plugin.id)
+            assertEquals("中文插件", plugin.name)
+            assertEquals("4.2", plugin.version)
+            assertEquals("插件说明", plugin.description)
+
+            val manifest = "Manifest-Version: 1.0\r\nImplementation-Version: 5.3\r\n\r\n"
+            val plain = localJar("plain.jar", invalid + ("META-INF/MANIFEST.MF" to manifest.toByteArray()), ServerType.FORGE)
+            assertEquals("plain", plain.name)
+            assertEquals("5.3", plain.version)
+            assertNull(plain.description)
+        }
+    }
+
+    @Test fun fabricMetadataStillTakesPrecedenceOverInvalidQuilt() {
+        val addon = localJar("fabric.jar", mapOf(
+            "fabric.mod.json" to fabricJson().toByteArray(),
+            "quilt.mod.json" to "{broken".toByteArray(),
+        ), ServerType.FABRIC)
+        assertEquals("中文测试模组", addon.name)
+        assertEquals("zh-test-mod", addon.id)
+    }
+
     private fun fabricJson(): String =
         """{"schemaVersion":1,"id":"zh-test-mod","version":"1.0.0","name":"中文测试模组","description":"这是一段中文描述，用于复现乱码。"}"""
 

@@ -45,7 +45,7 @@ class CloudflareProviderTest {
         assertFalse(body.contains(token))
     }
 
-    @Test fun emptyListPostsAndExistingRecordPuts() = runBlocking {
+    @Test fun emptyListPostsAndExistingRecordPatches() = runBlocking {
         MockWebServer().use { server ->
             server.enqueue(MockResponse().setBody(records()))
             server.enqueue(MockResponse().setBody("""{"success":true,"result":{"id":"new"}}"""))
@@ -64,26 +64,26 @@ class CloudflareProviderTest {
             assertWrite(post, "A", "203.0.113.10")
             val putGet = server.takeRequest()
             assertEquals("AAAA", putGet.requestUrl?.queryParameter("type"))
-            val put = server.takeRequest()
-            assertEquals("PUT", put.method)
-            assertTrue(put.path!!.endsWith("/dns_records/rec-9"))
-            assertWrite(put, "AAAA", "2001:db8::10")
+            val patch = server.takeRequest()
+            assertEquals("PATCH", patch.method)
+            assertTrue(patch.path!!.endsWith("/dns_records/rec-9"))
+            assertWrite(patch, "AAAA", "2001:db8::10")
             assertEquals(4, server.requestCount)
         }
     }
 
-    @Test fun duplicateRecordsPutOnlyTheFirst() = runBlocking {
+    @Test fun duplicateRecordsPatchOnlyTheFirst() = runBlocking {
         MockWebServer().use { server ->
             server.enqueue(MockResponse().setBody(records(record("rec-1"), record("rec-2"))))
             server.enqueue(MockResponse().setBody("""{"success":true}"""))
             val result = provider(server).apply("203.0.113.11", null, config) as DdnsResult.Updated
             assertTrue(result.detail.contains("多余"))
             assertEquals("GET", server.takeRequest().method)
-            val put = server.takeRequest()
-            assertEquals("PUT", put.method)
-            assertTrue(put.path!!.contains("rec-1"))
-            assertFalse(put.path!!.contains("rec-2"))
-            assertWrite(put, "A", "203.0.113.11")
+            val patch = server.takeRequest()
+            assertEquals("PATCH", patch.method)
+            assertTrue(patch.path!!.contains("rec-1"))
+            assertFalse(patch.path!!.contains("rec-2"))
+            assertWrite(patch, "A", "203.0.113.11")
             assertEquals(2, server.requestCount)
         }
     }
@@ -94,6 +94,7 @@ class CloudflareProviderTest {
                 server.enqueue(MockResponse().setResponseCode(code).setBody("""{"success":false,"errors":[{"message":"no"}]}"""))
                 val failed = provider(server).apply("203.0.113.1", null, config) as DdnsResult.Failed
                 assertFalse(failed.retryable)
+                assertTrue(failed.credential)
                 assertTrue(failed.message.contains(code.toString()))
                 assertFalse(failed.message.contains(token))
                 assertEquals(1, server.requestCount)
@@ -127,6 +128,17 @@ class CloudflareProviderTest {
             server.enqueue(MockResponse().setResponseCode(200).setBody("""{"success":false}"""))
             val failed = provider(server).apply("203.0.113.1", null, config) as DdnsResult.Failed
             assertFalse(failed.retryable)
+            assertFalse(failed.credential)
+        }
+    }
+
+    @Test fun notFoundIsPermanentButNotACredentialRejection() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setResponseCode(404).setBody("""{"success":false}"""))
+            val failed = provider(server).apply("203.0.113.1", null, config) as DdnsResult.Failed
+            assertFalse(failed.retryable)
+            assertFalse(failed.credential)
+            assertEquals("Cloudflare 请求失败（404）", failed.message)
         }
     }
 

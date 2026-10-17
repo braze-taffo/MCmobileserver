@@ -19,8 +19,15 @@ data class DdnsConfig(
     val token: String = "",
 ) {
     fun fingerprint(): String {
-        return listOf(provider.name, hostname, cloudflareRecord, duckSubdomain, webhookFingerprintPart(), sha16(token))
-            .joinToString("|")
+        return listOf(
+            provider.name,
+            hostname,
+            cloudflareZoneId,
+            cloudflareRecord,
+            duckSubdomain,
+            webhookFingerprintPart(),
+            sha16(token),
+        ).joinToString("|")
     }
 
     /** Host hash plus a hash of the full URL. The query string, which often holds the secret, stays out. */
@@ -60,8 +67,8 @@ data class DdnsConfig(
                 require(webhookUrl.startsWith("https://") && webhookUrl.none { it.isWhitespace() }) {
                     "Webhook 只支持 https 地址"
                 }
-                require(listOf("{ipv4}", "{ipv6}", "{ip}").any { it in webhookUrl }) {
-                    "Webhook 地址需包含 {ipv4}、{ipv6} 或 {ip}"
+                require(webhookPlaceholderInPathOrQuery(webhookUrl)) {
+                    "Webhook 地址的路径或查询参数需包含 {ipv4}、{ipv6} 或 {ip}"
                 }
             }
             DdnsProviderId.ALIYUN, DdnsProviderId.DNSPOD ->
@@ -80,6 +87,20 @@ data class DdnsConfig(
             return value.split('.').all { label ->
                 label.matches(Regex("[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?"))
             }
+        }
+
+        /** A fragment is not sent on the wire, so a placeholder that lives only there does not count. */
+        fun webhookPlaceholderInPathOrQuery(url: String): Boolean {
+            var rest = url.substringBefore('#').substringAfter("://", "")
+            if (rest.isEmpty()) return false
+            val pathAt = rest.indexOf('/')
+            val queryAt = rest.indexOf('?')
+            val authorityEnd = listOf(pathAt, queryAt).filter { it >= 0 }.minOrNull() ?: rest.length
+            val at = rest.indexOf('@')
+            if (at in 0 until authorityEnd) rest = rest.substring(at + 1)
+            val start = listOf(rest.indexOf('/'), rest.indexOf('?')).filter { it >= 0 }.minOrNull() ?: return false
+            val pathQuery = rest.substring(start)
+            return listOf("{ipv4}", "{ipv6}", "{ip}").any { it in pathQuery }
         }
     }
 }

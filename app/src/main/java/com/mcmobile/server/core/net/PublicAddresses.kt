@@ -21,9 +21,10 @@ data class Ipv6Candidate(
  */
 object Ipv6AddressFlags {
     const val TEMPORARY = 0x01
+    const val DADFAILED = 0x08
     const val DEPRECATED = 0x20
     const val TENTATIVE = 0x40
-    const val UNUSABLE = TEMPORARY or DEPRECATED or TENTATIVE
+    const val UNUSABLE = TEMPORARY or DADFAILED or DEPRECATED or TENTATIVE
 
     fun unusable(flags: Int): Boolean = flags and UNUSABLE != 0
 }
@@ -53,7 +54,7 @@ object PublicAddresses {
     }
 
     /**
-     * Global unicast only. Drops temporary, deprecated, and tentative flags, and never
+     * Global unicast only. Drops temporary, DAD-failed, deprecated, and tentative flags, and never
      * returns ULA (`fc00::/7`). No usable global address yields null.
      */
     fun pickIpv6(candidates: List<Ipv6Candidate>): String? {

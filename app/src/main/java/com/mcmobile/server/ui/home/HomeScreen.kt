@@ -3,6 +3,7 @@ package com.mcmobile.server.ui.home
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -22,6 +23,7 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Memory
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Terminal
@@ -29,6 +31,8 @@ import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExtendedFloatingActionButton
 import androidx.compose.material3.Icon
@@ -129,33 +133,37 @@ fun HomeScreen(vm: AppViewModel, nav: NavController) {
     Scaffold(
         topBar = {
             Surface(color = MaterialTheme.colorScheme.primary) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .statusBarsPadding()
-                        .padding(horizontal = 16.dp, vertical = 10.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    IconButton(onClick = { nav.popBackStack() }) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, "返回首页", tint = MaterialTheme.colorScheme.onPrimary)
-                    }
-                    Text(
-                        "服务器管理",
-                        style = MaterialTheme.typography.titleLarge,
-                        color = MaterialTheme.colorScheme.onPrimary,
-                        fontWeight = FontWeight.Bold,
-                    )
-                    Spacer(Modifier.weight(1f))
-                    TextButton(onClick = { nav.navigate(Routes.PACK_IMPORT) }) { Text("导入整包", color = MaterialTheme.colorScheme.onPrimary) }
-                    TextButton(onClick = { nav.navigate(Routes.FRP) }) {
-                        Text("穿透", color = MaterialTheme.colorScheme.onPrimary)
-                    }
-                    TextButton(onClick = { nav.navigate(Routes.DDNS) }) {
-                        Text("域名", color = MaterialTheme.colorScheme.onPrimary)
-                    }
-                    IconButton(onClick = { nav.navigate(Routes.SETTINGS) }) {
-                        Icon(Icons.Default.Settings, "设置",
-                            tint = MaterialTheme.colorScheme.onPrimary)
+                BoxWithConstraints(Modifier.fillMaxWidth().statusBarsPadding()) {
+                    val compact = maxWidth < 600.dp
+                    val onBar = MaterialTheme.colorScheme.onPrimary
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        IconButton(onClick = { nav.popBackStack() }) {
+                            Icon(Icons.AutoMirrored.Filled.ArrowBack, "返回首页", tint = onBar)
+                        }
+                        Text(
+                            "服务器管理",
+                            modifier = Modifier.weight(1f),
+                            style = MaterialTheme.typography.titleLarge,
+                            color = onBar,
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        if (compact) {
+                            HomeOverflow(nav, onBar)
+                        } else {
+                            TextButton(onClick = { nav.navigate(Routes.PACK_IMPORT) }) { Text("导入整包", color = onBar) }
+                            TextButton(onClick = { nav.navigate(Routes.FRP) }) { Text("穿透", color = onBar) }
+                            TextButton(onClick = { nav.navigate(Routes.DDNS) }) { Text("域名", color = onBar) }
+                        }
+                        IconButton(onClick = { nav.navigate(Routes.SETTINGS) }) {
+                            Icon(Icons.Default.Settings, "设置", tint = onBar)
+                        }
                     }
                 }
             }
@@ -226,6 +234,30 @@ fun HomeScreen(vm: AppViewModel, nav: NavController) {
                     }
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun HomeOverflow(nav: NavController, tint: Color) {
+    var open by remember { mutableStateOf(false) }
+    Box {
+        IconButton(onClick = { open = true }) {
+            Icon(Icons.Default.MoreVert, "更多", tint = tint)
+        }
+        DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+            DropdownMenuItem(text = { Text("导入整包") }, onClick = {
+                open = false
+                nav.navigate(Routes.PACK_IMPORT)
+            })
+            DropdownMenuItem(text = { Text("内网穿透") }, onClick = {
+                open = false
+                nav.navigate(Routes.FRP)
+            })
+            DropdownMenuItem(text = { Text("动态域名") }, onClick = {
+                open = false
+                nav.navigate(Routes.DDNS)
+            })
         }
     }
 }

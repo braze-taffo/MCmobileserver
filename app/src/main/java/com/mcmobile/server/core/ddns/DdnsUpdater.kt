@@ -12,24 +12,28 @@ class DdnsUpdater(
 ) {
     private var backoffUntilMs = 0L
     private var backoffStep = 0
+    /** Fingerprint of the attempt that scheduled [backoffUntilMs]. Not the last success. */
+    private var backoffFingerprint: String? = null
     private var frozenFingerprint: String? = null
+    private var frozenCredential = false
 
     fun tick(nowMs: Long, ipv4: String?, ipv6: String?, fingerprint: String): DdnsDecision {
         if (frozenFingerprint != null && frozenFingerprint != fingerprint) {
             frozenFingerprint = null
-            backoffStep = 0
-            backoffUntilMs = 0L
+            frozenCredential = false
+            clearBackoff()
         }
-        if (frozenFingerprint != null) return DdnsDecision.Skip("凭据被拒绝")
-        if (lastFingerprint != null && lastFingerprint != fingerprint) {
-            backoffStep = 0
-            backoffUntilMs = 0L
+        if (frozenFingerprint != null) {
+            return DdnsDecision.Skip(if (frozenCredential) SKIP_CREDENTIAL else SKIP_STOPPED)
         }
+        // A new config after a success used to look like a fingerprint change on every later tick,
+        // because lastFingerprint stays on the previous success until the new attempt works.
+        if (backoffFingerprint != null && backoffFingerprint != fingerprint) clearBackoff()
         if (lastFingerprint != null && ipv4 == lastIpv4 && ipv6 == lastIpv6 && fingerprint == lastFingerprint) {
-            return DdnsDecision.Skip("IP 未变化")
+            return DdnsDecision.Skip(SKIP_UNCHANGED)
         }
-        if (ipv4 == null && ipv6 == null) return DdnsDecision.Skip("没有可用的公网地址")
-        if (nowMs < backoffUntilMs) return DdnsDecision.Skip("等待重试")
+        if (ipv4 == null && ipv6 == null) return DdnsDecision.Skip(SKIP_NO_ADDRESS)
+        if (nowMs < backoffUntilMs) return DdnsDecision.Skip(SKIP_BACKOFF)
         return DdnsDecision.Apply(ipv4, ipv6, fingerprint)
     }
 
@@ -37,21 +41,34 @@ class DdnsUpdater(
         lastIpv4 = ipv4
         lastIpv6 = ipv6
         lastFingerprint = fingerprint
-        backoffStep = 0
-        backoffUntilMs = 0L
+        clearBackoff()
         frozenFingerprint = null
+        frozenCredential = false
     }
 
-    fun onFailure(nowMs: Long, retryable: Boolean, fingerprint: String) {
+    fun onFailure(nowMs: Long, retryable: Boolean, fingerprint: String, credential: Boolean = false) {
         if (!retryable) {
             frozenFingerprint = fingerprint
+            frozenCredential = credential
             return
         }
+        backoffFingerprint = fingerprint
         backoffUntilMs = nowMs + DELAYS[backoffStep.coerceAtMost(DELAYS.lastIndex)]
         backoffStep = (backoffStep + 1).coerceAtMost(DELAYS.lastIndex)
     }
 
+    private fun clearBackoff() {
+        backoffStep = 0
+        backoffUntilMs = 0L
+        backoffFingerprint = null
+    }
+
     companion object {
         val DELAYS = longArrayOf(60_000L, 300_000L, 900_000L)
+        const val SKIP_UNCHANGED = "IP 未变化"
+        const val SKIP_CREDENTIAL = "凭据被拒绝"
+        const val SKIP_BACKOFF = "等待重试"
+        const val SKIP_STOPPED = "已停止重试"
+        const val SKIP_NO_ADDRESS = "没有可用的公网地址"
     }
 }

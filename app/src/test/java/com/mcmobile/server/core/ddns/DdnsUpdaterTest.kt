@@ -70,11 +70,43 @@ class DdnsUpdaterTest {
         val updater = DdnsUpdater()
         val fp = base.fingerprint()
         assertTrue(updater.tick(0, v4, null, fp) is DdnsDecision.Apply)
-        updater.onFailure(0, retryable = false, fp)
+        updater.onFailure(0, retryable = false, fp, credential = true)
         assertEquals("凭据被拒绝", (updater.tick(900_000, v4, null, fp) as DdnsDecision.Skip).reason)
         assertTrue(updater.tick(1_800_000, v4, null, fp) is DdnsDecision.Skip)
         val next = base.copy(token = "rotated")
         assertTrue(updater.tick(1_800_000, v4, null, next.fingerprint()) is DdnsDecision.Apply)
+    }
+
+    @Test fun otherPermanentFailureIsNotLabeledAsCredentials() {
+        val updater = DdnsUpdater()
+        val fp = base.fingerprint()
+        updater.onFailure(0, retryable = false, fp, credential = false)
+        assertEquals(DdnsUpdater.SKIP_STOPPED, (updater.tick(900_000, v4, null, fp) as DdnsDecision.Skip).reason)
+        assertTrue(updater.tick(1_800_000, v4, null, fp) is DdnsDecision.Skip)
+        val next = base.copy(cloudflareZoneId = "other-zone")
+        assertTrue(updater.tick(1_800_000, v4, null, next.fingerprint()) is DdnsDecision.Apply)
+    }
+
+    @Test fun retryableFailureAfterConfigChangeKeepsBackoff() {
+        val updater = DdnsUpdater()
+        updater.onSuccess(v4, null, base.fingerprint())
+        val changed = base.copy(hostname = "other.example.com", cloudflareRecord = "other.example.com")
+        val fp = changed.fingerprint()
+        assertTrue(updater.tick(0, v4, null, fp) is DdnsDecision.Apply)
+        updater.onFailure(0, retryable = true, fp)
+        assertEquals(DdnsUpdater.SKIP_BACKOFF, (updater.tick(1_000, v4, null, fp) as DdnsDecision.Skip).reason)
+        assertTrue(updater.tick(59_999, v4, null, fp) is DdnsDecision.Skip)
+        assertTrue(updater.tick(60_000, v4, null, fp) is DdnsDecision.Apply)
+    }
+
+    @Test fun fingerprintChangeDuringBackoffAppliesImmediately() {
+        val updater = DdnsUpdater()
+        val fp = base.fingerprint()
+        updater.onSuccess(v4, null, fp)
+        assertTrue(updater.tick(0, "203.0.113.9", null, fp) is DdnsDecision.Apply)
+        updater.onFailure(0, retryable = true, fp)
+        val next = base.copy(token = "other").fingerprint()
+        assertTrue(updater.tick(1_000, v4, null, next) is DdnsDecision.Apply)
     }
 
     @Test fun fakeProviderIsCountedOnlyOnApply() {

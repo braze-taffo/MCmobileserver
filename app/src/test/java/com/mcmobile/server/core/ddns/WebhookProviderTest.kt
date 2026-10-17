@@ -53,6 +53,43 @@ class WebhookProviderTest {
         }
     }
 
+    @Test fun missingReferencedFamilyDoesNotCallOrCountAsSuccess() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setResponseCode(204))
+            val failed = WebhookProvider(OkHttpClient()).apply(
+                null,
+                "2001:db8::1",
+                config("https://ddns.example/hook?v4={ipv4}&v6={ipv6}"),
+            ) as DdnsResult.Failed
+            assertTrue(failed.retryable)
+            assertFalse(failed.credential)
+            assertTrue(failed.message.contains("IPv4"))
+            assertFalse(failed.message.contains("ddns.example"))
+            assertEquals(0, server.requestCount)
+            assertNull(WebhookProvider.expand("https://ddns.example/hook?v4={ipv4}", null, "2001:db8::1"))
+        }
+    }
+
+    @Test fun fragmentPlaceholderDoesNotRequireThatFamily() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setResponseCode(204))
+            val http = OkHttpClient.Builder().addInterceptor { chain ->
+                val target = server.url(chain.request().url.encodedPath).newBuilder().apply {
+                    chain.request().url.encodedQuery?.let { encodedQuery(it) }
+                }.build()
+                chain.proceed(chain.request().newBuilder().url(target).build())
+            }.build()
+            val result = WebhookProvider(http).apply(
+                null,
+                "2001:db8::2",
+                config("https://ddns.example/hook?ip={ip}#{ipv4}"),
+            )
+            assertTrue(result is DdnsResult.Updated)
+            assertEquals(1, server.requestCount)
+            assertFalse(server.takeRequest().path!!.contains("ipv4"))
+        }
+    }
+
     @Test fun rejectsPlainHttpWithoutCalling() = runBlocking {
         MockWebServer().use { server ->
             server.enqueue(MockResponse().setResponseCode(200))

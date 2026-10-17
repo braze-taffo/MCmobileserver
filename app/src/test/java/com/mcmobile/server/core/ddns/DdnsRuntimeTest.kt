@@ -250,7 +250,11 @@ class DdnsRuntimeTest {
         var rotate = false
         val applies = AtomicInteger()
         val provider = counting(applies) { v4, v6 ->
-            if (applies.get() == 1) DdnsResult.Failed("no", retryable = false) else DdnsResult.Updated(v4, v6, "ok")
+            if (applies.get() == 1) {
+                DdnsResult.Failed("凭据被拒绝", retryable = false, credential = true)
+            } else {
+                DdnsResult.Updated(v4, v6, "ok")
+            }
         }
         var sawRejection = false
         val job = runLoop(
@@ -272,6 +276,65 @@ class DdnsRuntimeTest {
         withTimeout(5_000) { job.join() }
         assertEquals(2, applies.get())
         assertTrue(sawRejection)
+    }
+
+    @Test fun permanentFailureKeepsItsOwnMessage() = runBlocking {
+        var now = 0L
+        val applies = AtomicInteger()
+        val message = "Cloudflare 请求失败（404）"
+        val provider = counting(applies) { _, _ ->
+            DdnsResult.Failed(message, retryable = false, credential = false)
+        }
+        val job = runLoop(
+            scope(),
+            cloudflare("token"),
+            provider = provider,
+            clock = { now },
+            sleep = { ms -> now += ms },
+            maxLoops = 2,
+        )
+        withTimeout(5_000) { job.join() }
+        assertEquals(1, applies.get())
+        assertEquals(message, DdnsRuntime.state.value.lastError)
+        assertEquals(DdnsUpdater.SKIP_STOPPED, DdnsRuntime.state.value.skipped)
+    }
+
+    @Test fun unchangedIpClearsStaleProbeError() = runBlocking {
+        val config = webhook()
+        val endpoints = PublicEndpoints("203.0.113.8", null)
+        var probes = 0
+        val applies = AtomicInteger()
+        val job = runLoop(
+            scope(),
+            config,
+            applies = applies,
+            detect = {
+                probes++
+                if (probes == 1) PublicEndpoints(null, null) else endpoints
+            },
+            load = {
+                DdnsLoaded(
+                    config,
+                    lastIpv4 = endpoints.ipv4,
+                    lastIpv6 = endpoints.ipv6,
+                    lastFingerprint = config.fingerprint(),
+                )
+            },
+            maxLoops = 2,
+        )
+        withTimeout(5_000) { job.join() }
+        assertEquals(0, applies.get())
+        assertNull(DdnsRuntime.state.value.lastError)
+        assertEquals(DdnsUpdater.SKIP_UNCHANGED, DdnsRuntime.state.value.skipped)
+    }
+
+    @Test fun activeNetworkWithoutIpv6IsNotReplacedByOtherInterfaces() {
+        assertEquals(Ipv6NetworkPick.NONE, pickIpv6Network(activePresent = false, activeIsVpn = false, underlyingCount = 3))
+        assertEquals(Ipv6NetworkPick.ACTIVE, pickIpv6Network(activePresent = true, activeIsVpn = false, underlyingCount = 0))
+        assertEquals(Ipv6NetworkPick.ACTIVE, pickIpv6Network(activePresent = true, activeIsVpn = false, underlyingCount = 4))
+        assertEquals(Ipv6NetworkPick.NONE, pickIpv6Network(activePresent = true, activeIsVpn = true, underlyingCount = 0))
+        assertEquals(Ipv6NetworkPick.NONE, pickIpv6Network(activePresent = true, activeIsVpn = true, underlyingCount = 2))
+        assertEquals(Ipv6NetworkPick.UNDERLYING, pickIpv6Network(activePresent = true, activeIsVpn = true, underlyingCount = 1))
     }
 
     @Test fun redactDropsTokenQueryAndWebhook() {

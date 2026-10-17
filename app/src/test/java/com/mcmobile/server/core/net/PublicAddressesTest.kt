@@ -26,6 +26,7 @@ class PublicAddressesTest {
                 cand("2001:db8::aa", Ipv6AddressFlags.TEMPORARY),
                 cand("2001:db8::dead", Ipv6AddressFlags.DEPRECATED),
                 cand("2001:db8::777", Ipv6AddressFlags.TENTATIVE),
+                cand("2001:db8::dad", Ipv6AddressFlags.DADFAILED),
                 cand("2001:db8::bad", Ipv6AddressFlags.TEMPORARY or Ipv6AddressFlags.DEPRECATED),
                 stable,
             ),
@@ -37,17 +38,21 @@ class PublicAddressesTest {
                     cand("2001:db8::aa", Ipv6AddressFlags.TEMPORARY),
                     cand("2001:db8::dead", Ipv6AddressFlags.DEPRECATED),
                     cand("2001:db8::777", Ipv6AddressFlags.TENTATIVE),
+                    cand("2001:db8::dad", Ipv6AddressFlags.DADFAILED),
                 ),
             ),
         )
         assertNull(PublicAddresses.pickIpv6(listOf(cand("fe80::1"), cand("fd12:3456::1"))))
         assertNull(PublicAddresses.pickIpv6(listOf(cand("fe80::1"))))
         assertNotEquals(0, Ipv6AddressFlags.TEMPORARY)
+        assertNotEquals(0, Ipv6AddressFlags.DADFAILED)
         assertNotEquals(0, Ipv6AddressFlags.DEPRECATED)
         assertNotEquals(0, Ipv6AddressFlags.TENTATIVE)
+        assertEquals(0x08, Ipv6AddressFlags.DADFAILED)
         // android.jar leaves these at 0. A non-zero stub value must still be the kernel bit we filter on.
         val os = listOf(
             Ipv6AddressFlags.TEMPORARY to android.system.OsConstants.IFA_F_TEMPORARY,
+            Ipv6AddressFlags.DADFAILED to android.system.OsConstants.IFA_F_DADFAILED,
             Ipv6AddressFlags.DEPRECATED to android.system.OsConstants.IFA_F_DEPRECATED,
             Ipv6AddressFlags.TENTATIVE to android.system.OsConstants.IFA_F_TENTATIVE,
         )

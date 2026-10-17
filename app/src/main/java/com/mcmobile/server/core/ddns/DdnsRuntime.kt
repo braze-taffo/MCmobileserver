@@ -235,7 +235,7 @@ object DdnsRuntime {
                         mutableState.value = mutableState.value.copy(
                             active = true,
                             skipped = decision.reason,
-                            lastError = if (decision.reason == "凭据被拒绝") "凭据被拒绝" else mutableState.value.lastError,
+                            lastError = if (decision.reason == DdnsUpdater.SKIP_UNCHANGED) null else mutableState.value.lastError,
                             secretsLost = loaded.secretsLost,
                         )
                         sleep(intervalMs(config))
@@ -263,12 +263,16 @@ object DdnsRuntime {
                                 log("更新成功 $detail", config)
                             }
                             is DdnsResult.Failed -> {
-                                updater.onFailure(clock(), result.retryable, decision.fingerprint)
-                                val err = redact(if (result.retryable) result.message else "凭据被拒绝", config)
+                                updater.onFailure(clock(), result.retryable, decision.fingerprint, result.credential)
+                                val err = redact(result.message, config)
                                 mutableState.value = mutableState.value.copy(
                                     active = true,
                                     lastError = err,
-                                    skipped = if (result.retryable) null else "凭据被拒绝",
+                                    skipped = when {
+                                        result.retryable -> null
+                                        result.credential -> DdnsUpdater.SKIP_CREDENTIAL
+                                        else -> DdnsUpdater.SKIP_STOPPED
+                                    },
                                     secretsLost = loaded.secretsLost,
                                 )
                                 log("更新失败 $err", config)
@@ -325,10 +329,24 @@ object DdnsRuntime {
 private const val idleMs = 3_000L
 
 /**
+ * Which network may supply an IPv6 address.
+ * [ACTIVE] is the default network and is used even when it has no global address.
+ * [UNDERLYING] is the single non-VPN network behind an active VPN.
+ * [NONE] means do not guess: no active network, or several interfaces that might be idle.
+ */
+internal enum class Ipv6NetworkPick { NONE, ACTIVE, UNDERLYING }
+
+internal fun pickIpv6Network(activePresent: Boolean, activeIsVpn: Boolean, underlyingCount: Int): Ipv6NetworkPick {
+    if (!activePresent) return Ipv6NetworkPick.NONE
+    if (!activeIsVpn) return Ipv6NetworkPick.ACTIVE
+    return if (underlyingCount == 1) Ipv6NetworkPick.UNDERLYING else Ipv6NetworkPick.NONE
+}
+
+/**
  * IPv6 comes from `LinkProperties.linkAddresses`, whose flags are the kernel `IFA_F_*` bits.
- * Temporary, deprecated, and tentative addresses are dropped. No global unicast means no AAAA.
- * A VPN active network is not used; the underlying non-VPN network is. There is no unfiltered
- * interface scan, which would publish a privacy or ULA address.
+ * Temporary, DAD-failed, deprecated, and tentative addresses are dropped. No global unicast means no AAAA.
+ * The active network is the only source. When it has no usable address, other interfaces are not scanned.
+ * A VPN is not published; its underlying network is used only when that network is unambiguous.
  */
 internal fun nicsFromConnectivity(context: Context): List<Inet6Address> {
     val cm = runCatching { context.getSystemService(ConnectivityManager::class.java) }.getOrNull()
@@ -350,9 +368,21 @@ private fun ipv6Candidates(cm: ConnectivityManager): List<Ipv6Candidate> {
 
 @Suppress("DEPRECATION") // getAllNetworks is the list API still available since the min SDK.
 private fun networksForAddresses(cm: ConnectivityManager): List<Network> {
-    val active = runCatching { cm.activeNetwork }.getOrNull() ?: return emptyList()
-    val caps = runCatching { cm.getNetworkCapabilities(active) }.getOrNull()
-    if (caps?.hasTransport(NetworkCapabilities.TRANSPORT_VPN) != true) return listOf(active)
+    val active = runCatching { cm.activeNetwork }.getOrNull()
+    val activeIsVpn = active?.let { network ->
+        runCatching { cm.getNetworkCapabilities(network) }.getOrNull()
+            ?.hasTransport(NetworkCapabilities.TRANSPORT_VPN)
+    } == true
+    val underlying = if (activeIsVpn) nonVpnInternetNetworks(cm) else emptyList()
+    return when (pickIpv6Network(active != null, activeIsVpn, underlying.size)) {
+        Ipv6NetworkPick.NONE -> emptyList()
+        Ipv6NetworkPick.ACTIVE -> listOf(active!!)
+        Ipv6NetworkPick.UNDERLYING -> underlying
+    }
+}
+
+@Suppress("DEPRECATION")
+private fun nonVpnInternetNetworks(cm: ConnectivityManager): List<Network> {
     return runCatching { cm.allNetworks.toList() }.getOrDefault(emptyList()).filter { network ->
         val networkCaps = runCatching { cm.getNetworkCapabilities(network) }.getOrNull() ?: return@filter false
         networkCaps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&

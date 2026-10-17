@@ -66,6 +66,18 @@ class DdnsConfigTest {
             hook.copy(webhookUrl = "https://example.com/update").validate()
         }
         hook.copy(webhookUrl = "https://example.com/{ip}").validate()
+        hook.copy(webhookUrl = "https://example.com?ip={ip}").validate()
+        hook.copy(webhookUrl = "https://example.com/update?v={ipv6}").validate()
+        listOf(
+            "https://example.com/update#{ip}",
+            "https://example.com/update#ip={ipv4}",
+            "https://{ipv4}.example.com/hook",
+            "https://user:{ip}@example.com/hook",
+        ).forEach { bad ->
+            assertThrows(bad, IllegalArgumentException::class.java) {
+                hook.copy(webhookUrl = bad).validate()
+            }
+        }
     }
 
     @Test fun enabledAliyunAndDnspodAreRejected() {
@@ -83,6 +95,8 @@ class DdnsConfigTest {
         assertTrue(fp.startsWith("CLOUDFLARE|mc.example.com|"))
         assertNotEquals(fp, cf.copy(token = "other-token").fingerprint())
         assertNotEquals(fp, cf.copy(hostname = "other.example.com").fingerprint())
+        assertNotEquals(fp, cf.copy(cloudflareZoneId = "zone456").fingerprint())
+        assertTrue(fp.contains("zone123"))
         assertEquals(cf.copy(intervalSec = 90).fingerprint(), fp)
     }
 

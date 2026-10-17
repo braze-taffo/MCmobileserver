@@ -13,6 +13,7 @@ class WebhookProvider(private val http: OkHttpClient) : DdnsProvider {
     override val id = DdnsProviderId.WEBHOOK
 
     override suspend fun apply(ipv4: String?, ipv6: String?, config: DdnsConfig): DdnsResult = withContext(Dispatchers.IO) {
+        missingFamilies(config.webhookUrl, ipv4, ipv6)?.let { return@withContext it }
         val url = expand(config.webhookUrl, ipv4, ipv6)
             ?: return@withContext DdnsResult.Failed("Webhook 地址无效", retryable = false)
         val client = http.noRedirects()
@@ -20,7 +21,11 @@ class WebhookProvider(private val http: OkHttpClient) : DdnsProvider {
             client.newCall(Request.Builder().url(url).get().build()).execute().use { response ->
                 when (response.code) {
                     in 200..299 -> DdnsResult.Updated(ipv4, ipv6, "Webhook 已调用")
-                    401, 403 -> DdnsResult.Failed("Webhook 凭据被拒绝（${response.code}）", retryable = false)
+                    401, 403 -> DdnsResult.Failed(
+                        "Webhook 凭据被拒绝（${response.code}）",
+                        retryable = false,
+                        credential = true,
+                    )
                     else -> DdnsResult.Failed(
                         "Webhook 请求失败（${response.code}）",
                         retryable = response.code == 429 || response.code >= 500,
@@ -35,7 +40,27 @@ class WebhookProvider(private val http: OkHttpClient) : DdnsProvider {
     }
 
     companion object {
+        /**
+         * `{ipv4}` / `{ipv6}` name a family. An empty expansion would still be a 2xx and then
+         * suppress later calls, so a missing referenced family fails before the request.
+         * A fragment is not transmitted and does not count as a reference.
+         */
+        fun missingFamilies(template: String, ipv4: String?, ipv6: String?): DdnsResult.Failed? {
+            val transmitted = template.substringBefore('#')
+            val missing = buildList {
+                if ("{ipv4}" in transmitted && ipv4.isNullOrBlank()) add("IPv4")
+                if ("{ipv6}" in transmitted && ipv6.isNullOrBlank()) add("IPv6")
+            }
+            if (missing.isEmpty()) return null
+            return DdnsResult.Failed(
+                "Webhook 引用了未探测到的 ${missing.joinToString("、")}，已跳过",
+                retryable = true,
+            )
+        }
+
         fun expand(template: String, ipv4: String?, ipv6: String?): okhttp3.HttpUrl? {
+            if (missingFamilies(template, ipv4, ipv6) != null) return null
+            if ("{ip}" in template.substringBefore('#') && ipv4.isNullOrBlank() && ipv6.isNullOrBlank()) return null
             val replaced = template
                 .replace("{ipv4}", encode(ipv4.orEmpty()))
                 .replace("{ipv6}", encode(ipv6.orEmpty()))

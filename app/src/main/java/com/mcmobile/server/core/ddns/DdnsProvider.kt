@@ -14,7 +14,11 @@ interface DdnsProvider {
 sealed interface DdnsResult {
     data class Updated(val ipv4: String?, val ipv6: String?, val detail: String) : DdnsResult
     data class Unchanged(val reason: String) : DdnsResult
-    data class Failed(val message: String, val retryable: Boolean = true) : DdnsResult
+    data class Failed(
+        val message: String,
+        val retryable: Boolean = true,
+        val credential: Boolean = false,
+    ) : DdnsResult
     data object Unsupported : DdnsResult
 }
 

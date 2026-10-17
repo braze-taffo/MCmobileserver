@@ -35,7 +35,11 @@ class DuckDnsProvider(
                 val body = response.body?.string().orEmpty().trim()
                 val safe = scrub(body, config.token)
                 if (response.code == 401 || response.code == 403) {
-                    return@withContext DdnsResult.Failed("DuckDNS 凭据被拒绝（${response.code}）", retryable = false)
+                    return@withContext DdnsResult.Failed(
+                        "DuckDNS 凭据被拒绝（${response.code}）",
+                        retryable = false,
+                        credential = true,
+                    )
                 }
                 if (!response.isSuccessful) {
                     return@withContext DdnsResult.Failed(

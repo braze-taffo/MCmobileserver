@@ -74,11 +74,13 @@ fun DdnsScreen(nav: NavController) {
     var busy by remember { mutableStateOf(false) }
     var message by remember { mutableStateOf<String?>(null) }
     var menu by remember { mutableStateOf(false) }
+    var tokens by remember { mutableStateOf(mapOf<DdnsProviderId, String>()) }
     LaunchedEffect(Unit) {
         try {
             val loaded = withContext(Dispatchers.IO) { DdnsStore.android(context).load() }
             snapshot = loaded
             config = loaded.config
+            tokens = mapOf(loaded.config.provider to loaded.config.token)
             intervalText = loaded.config.intervalSec.toString()
         } catch (e: Exception) {
             message = "读取配置失败：${e.message}"
@@ -117,7 +119,9 @@ fun DdnsScreen(nav: NavController) {
                 DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
                     DdnsProviderId.entries.forEach { id ->
                         DropdownMenuItem(text = { Text(id.label()) }, onClick = {
-                            config = config.copy(provider = id)
+                            val (next, kept) = switchDdnsProvider(config, tokens, id)
+                            config = next
+                            tokens = kept
                             menu = false
                         })
                     }
@@ -145,7 +149,7 @@ fun DdnsScreen(nav: NavController) {
                 DdnsProviderId.WEBHOOK -> {
                     DdnsField("主机名（用于展示和复制）", config.hostname, ready && !busy) { config = config.copy(hostname = it.trim()) }
                     DdnsField("Webhook URL", config.webhookUrl, ready && !busy) { config = config.copy(webhookUrl = it.trim()) }
-                    Text("地址必须是 https，并包含 {ipv4}、{ipv6} 或 {ip}。URL 里的 token 会进对方的访问日志。",
+                    Text("地址必须是 https，并在路径或查询参数里包含 {ipv4}、{ipv6} 或 {ip}。只写在 # 后面不会发出去。URL 里的 token 会进对方的访问日志。",
                         style = MaterialTheme.typography.bodySmall)
                 }
                 DdnsProviderId.ALIYUN, DdnsProviderId.DNSPOD ->
@@ -236,6 +240,17 @@ private fun DdnsField(
         ),
         visualTransformation = if (secret) PasswordVisualTransformation() else VisualTransformation.None,
     )
+}
+
+/** Keep each provider's token. Switching must not submit the previous provider's credential. */
+internal fun switchDdnsProvider(
+    config: DdnsConfig,
+    tokens: Map<DdnsProviderId, String>,
+    next: DdnsProviderId,
+): Pair<DdnsConfig, Map<DdnsProviderId, String>> {
+    if (next == config.provider) return config to tokens
+    val kept = tokens + (config.provider to config.token)
+    return config.copy(provider = next, token = kept[next].orEmpty()) to kept
 }
 
 private fun DdnsProviderId.label(): String = when (this) {

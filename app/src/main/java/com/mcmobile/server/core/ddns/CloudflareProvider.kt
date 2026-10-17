@@ -70,7 +70,8 @@ class CloudflareProvider(
         val call = if (exact.isEmpty()) {
             request(recordsUrl(zone), token).post(payload(type, name, ip))
         } else {
-            request(recordsUrl(zone, id = exact[0].id), token).put(payload(type, name, ip))
+            // PATCH updates the fields this client owns. PUT would overwrite comments, tags, and other settings.
+            request(recordsUrl(zone, id = exact[0].id), token).patch(payload(type, name, ip))
         }
         return try {
             http.newCall(call.build()).execute().use { response ->
@@ -136,12 +137,13 @@ class CloudflareProvider(
         private fun httpFailure(code: Int): DdnsResult.Failed? {
             if (code in 200..299) return null
             val retryable = code == 429 || code >= 500
+            val credential = code == 401 || code == 403
             val message = when (code) {
                 401, 403 -> "Cloudflare 凭据被拒绝（$code）"
                 429 -> "Cloudflare 请求受限（429）"
                 else -> "Cloudflare 请求失败（$code）"
             }
-            return DdnsResult.Failed(message, retryable = retryable)
+            return DdnsResult.Failed(message, retryable = retryable, credential = credential)
         }
     }
 }

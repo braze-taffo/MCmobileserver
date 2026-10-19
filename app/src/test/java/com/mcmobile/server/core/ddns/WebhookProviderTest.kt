@@ -128,6 +128,30 @@ class WebhookProviderTest {
         }
     }
 
+    @Test fun requestTimeoutIsRetryable() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setResponseCode(408))
+            // OkHttp retries 408 once when retryOnConnectionFailure is left on.
+            val http = OkHttpClient.Builder()
+                .retryOnConnectionFailure(false)
+                .addInterceptor { chain ->
+                    val target = server.url(chain.request().url.encodedPath).newBuilder().apply {
+                        chain.request().url.encodedQuery?.let { encodedQuery(it) }
+                    }.build()
+                    chain.proceed(chain.request().newBuilder().url(target).build())
+                }.build()
+            val failed = WebhookProvider(http).apply(
+                "203.0.113.9",
+                null,
+                config("https://ddns.example/hook?ip={ip}"),
+            ) as DdnsResult.Failed
+            assertTrue(failed.retryable)
+            assertFalse(failed.credential)
+            assertTrue(failed.message.contains("408"))
+            assertEquals(1, server.requestCount)
+        }
+    }
+
     @Test fun doesNotFollowRedirects() = runBlocking {
         MockWebServer().use { server ->
             server.enqueue(MockResponse().setResponseCode(302).addHeader("Location", "https://evil.example/collect?token=$token"))

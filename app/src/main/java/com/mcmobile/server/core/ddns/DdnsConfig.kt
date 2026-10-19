@@ -2,6 +2,8 @@ package com.mcmobile.server.core.ddns
 
 import java.security.MessageDigest
 import kotlinx.serialization.Serializable
+import okhttp3.HttpUrl
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 
 @Serializable
 enum class DdnsProviderId { CLOUDFLARE, DUCKDNS, WEBHOOK, ALIYUN, DNSPOD }
@@ -64,7 +66,7 @@ data class DdnsConfig(
             }
             DdnsProviderId.WEBHOOK -> {
                 require(dnsHostname(hostname)) { "请填写有效的主机名" }
-                require(webhookUrl.startsWith("https://") && webhookUrl.none { it.isWhitespace() }) {
+                require(webhookUrl.none { it.isWhitespace() } && httpsUrlWithHost(webhookUrl) != null) {
                     "Webhook 只支持 https 地址"
                 }
                 require(webhookPlaceholderInPathOrQuery(webhookUrl)) {
@@ -87,6 +89,21 @@ data class DdnsConfig(
             return value.split('.').all { label ->
                 label.matches(Regex("[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?"))
             }
+        }
+
+        /**
+         * OkHttp folds `https:///update` into host "update". Require https and a real authority
+         * immediately after the scheme, and reject whitespace that the parser would otherwise trim.
+         */
+        fun httpsUrlWithHost(url: String): HttpUrl? {
+            if (url.isEmpty() || url.any { it.isWhitespace() }) return null
+            val parsed = url.toHttpUrlOrNull() ?: return null
+            if (parsed.scheme != "https" || parsed.host.isEmpty()) return null
+            val authority = url.substringAfter("://", "")
+            if (authority.isEmpty() || authority[0] == '/' || authority[0] == '?' || authority[0] == '#') {
+                return null
+            }
+            return parsed
         }
 
         /** A fragment is not sent on the wire, so a placeholder that lives only there does not count. */

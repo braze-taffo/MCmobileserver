@@ -68,6 +68,18 @@ class DdnsConfigTest {
         hook.copy(webhookUrl = "https://example.com/{ip}").validate()
         hook.copy(webhookUrl = "https://example.com?ip={ip}").validate()
         hook.copy(webhookUrl = "https://example.com/update?v={ipv6}").validate()
+        hook.copy(webhookUrl = "https://example.com/update?ip={ip}").validate()
+        listOf(
+            "https:///update?ip={ip}",
+            "https:///?ip={ip}",
+            "https:////hook?ip={ip}",
+            "https://?ip={ip}",
+            "https://",
+        ).forEach { bad ->
+            assertThrows(bad, IllegalArgumentException::class.java) {
+                hook.copy(webhookUrl = bad).validate()
+            }
+        }
         listOf(
             "https://example.com/update#{ip}",
             "https://example.com/update#ip={ipv4}",

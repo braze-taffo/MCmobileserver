@@ -41,7 +41,7 @@ class DuckDnsProviderTest {
             server.enqueue(MockResponse().setBody("KO\ndenied\n"))
             val provider = DuckDnsProvider(OkHttpClient(), server.url("/update").toString())
             val failed = provider.apply("203.0.113.5", "2001:db8::5", config) as DdnsResult.Failed
-            assertTrue(failed.retryable)
+            assertFalse(failed.retryable)
             assertTrue(failed.message.contains("KO"))
             assertTrue(failed.message.contains("denied"))
             assertFalse(failed.message.contains(token))

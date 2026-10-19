@@ -5,7 +5,6 @@ import java.net.URLEncoder
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
 
@@ -28,7 +27,7 @@ class WebhookProvider(private val http: OkHttpClient) : DdnsProvider {
                     )
                     else -> DdnsResult.Failed(
                         "Webhook 请求失败（${response.code}）",
-                        retryable = response.code == 429 || response.code >= 500,
+                        retryable = response.code == 408 || response.code == 429 || response.code >= 500,
                     )
                 }
             }
@@ -65,9 +64,7 @@ class WebhookProvider(private val http: OkHttpClient) : DdnsProvider {
                 .replace("{ipv4}", encode(ipv4.orEmpty()))
                 .replace("{ipv6}", encode(ipv6.orEmpty()))
                 .replace("{ip}", encode(ipv6 ?: ipv4 ?: ""))
-            val parsed = replaced.toHttpUrlOrNull() ?: return null
-            if (parsed.scheme != "https") return null
-            return parsed
+            return DdnsConfig.httpsUrlWithHost(replaced)
         }
 
         private fun encode(value: String): String =

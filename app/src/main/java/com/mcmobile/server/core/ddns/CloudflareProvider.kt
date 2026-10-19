@@ -27,17 +27,19 @@ class CloudflareProvider(
     override val id = DdnsProviderId.CLOUDFLARE
 
     override suspend fun apply(ipv4: String?, ipv6: String?, config: DdnsConfig): DdnsResult = withContext(Dispatchers.IO) {
-        val families = buildList {
-            if (!ipv4.isNullOrBlank()) add("A" to ipv4)
-            if (!ipv6.isNullOrBlank()) add("AAAA" to ipv6)
+        if (ipv4.isNullOrBlank() && ipv6.isNullOrBlank()) {
+            return@withContext DdnsResult.Failed("没有可用的公网地址")
         }
-        if (families.isEmpty()) return@withContext DdnsResult.Failed("没有可用的公网地址")
         val zone = config.cloudflareZoneId.trim()
         val name = config.cloudflareRecord.ifBlank { config.hostname }.trim()
         val details = mutableListOf<String>()
         var wrote4: String? = null
         var wrote6: String? = null
-        for ((type, ip) in families) {
+        val present = buildList {
+            if (!ipv4.isNullOrBlank()) add("A" to ipv4)
+            if (!ipv6.isNullOrBlank()) add("AAAA" to ipv6)
+        }
+        for ((type, ip) in present) {
             when (val one = upsert(type, ip, zone, name, config.token)) {
                 is DdnsResult.Failed -> return@withContext one
                 is DdnsResult.Updated -> {
@@ -47,25 +49,25 @@ class CloudflareProvider(
                 else -> return@withContext DdnsResult.Failed("Cloudflare 更新失败")
             }
         }
+        val absent = buildList {
+            if (ipv4.isNullOrBlank()) add("A")
+            if (ipv6.isNullOrBlank()) add("AAAA")
+        }
+        for (type in absent) {
+            when (val one = deleteFamily(type, zone, name, config.token)) {
+                is DdnsResult.Failed -> return@withContext one
+                is DdnsResult.Updated -> if (one.detail.isNotBlank()) details += one.detail
+                else -> return@withContext DdnsResult.Failed("Cloudflare 更新失败")
+            }
+        }
         DdnsResult.Updated(wrote4, wrote6, details.joinToString("；"))
     }
 
     private fun upsert(type: String, ip: String, zone: String, name: String, token: String): DdnsResult {
-        val listed = try {
-            http.newCall(request(recordsUrl(zone, type, name), token).get().build()).execute().use { response ->
-                httpFailure(response.code)?.let { return it }
-                parseRecords(response.body?.string().orEmpty())
-            }
-        } catch (e: CancellationException) {
-            throw e
-        } catch (_: CfRejected) {
-            return DdnsResult.Failed("Cloudflare 拒绝了查询", retryable = false)
-        } catch (_: IOException) {
-            return DdnsResult.Failed("Cloudflare 网络失败")
-        } catch (_: Exception) {
-            return DdnsResult.Failed("Cloudflare 响应无法解析")
+        val exact = when (val listed = listed(type, zone, name, token)) {
+            is ListResult.Failed -> return listed.error
+            is ListResult.Ok -> listed.records
         }
-        val exact = listed.filter { it.name.equals(name, ignoreCase = true) }
         val extra = if (exact.size > 1) "，另有 ${exact.size - 1} 条多余记录，仅更新第一条，未删除" else ""
         val call = if (exact.isEmpty()) {
             request(recordsUrl(zone), token).post(payload(type, name, ip))
@@ -83,6 +85,48 @@ class CloudflareProvider(
             throw e
         } catch (_: IOException) {
             DdnsResult.Failed("Cloudflare 网络失败")
+        }
+    }
+
+    /** Drop every exact A or AAAA left behind after that family is no longer detected. */
+    private fun deleteFamily(type: String, zone: String, name: String, token: String): DdnsResult {
+        val exact = when (val listed = listed(type, zone, name, token)) {
+            is ListResult.Failed -> return listed.error
+            is ListResult.Ok -> listed.records.filter { it.id.isNotBlank() }
+        }
+        if (exact.isEmpty()) return DdnsResult.Updated(null, null, "")
+        for (record in exact) {
+            try {
+                http.newCall(request(recordsUrl(zone, id = record.id), token).delete().build()).execute().use { response ->
+                    httpFailure(response.code)?.let { return it }
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: IOException) {
+                return DdnsResult.Failed("Cloudflare 网络失败")
+            }
+        }
+        return DdnsResult.Updated(null, null, "已删除过期 $type")
+    }
+
+    private fun listed(type: String, zone: String, name: String, token: String): ListResult {
+        return try {
+            http.newCall(request(recordsUrl(zone, type, name), token).get().build()).execute().use { response ->
+                httpFailure(response.code)?.let { return ListResult.Failed(it) }
+                ListResult.Ok(
+                    parseRecords(response.body?.string().orEmpty()).filter {
+                        it.name.equals(name, ignoreCase = true)
+                    },
+                )
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: CfRejected) {
+            ListResult.Failed(DdnsResult.Failed("Cloudflare 拒绝了查询", retryable = false))
+        } catch (_: IOException) {
+            ListResult.Failed(DdnsResult.Failed("Cloudflare 网络失败"))
+        } catch (_: Exception) {
+            ListResult.Failed(DdnsResult.Failed("Cloudflare 响应无法解析"))
         }
     }
 
@@ -158,5 +202,10 @@ private data class CfBody(
 )
 
 private data class CfRecord(val id: String, val name: String)
+
+private sealed interface ListResult {
+    data class Ok(val records: List<CfRecord>) : ListResult
+    data class Failed(val error: DdnsResult.Failed) : ListResult
+}
 
 private class CfRejected : Exception()

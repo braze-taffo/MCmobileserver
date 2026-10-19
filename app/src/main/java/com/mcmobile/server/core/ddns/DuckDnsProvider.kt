@@ -49,7 +49,7 @@ class DuckDnsProvider(
                 }
                 when {
                     safe.startsWith("OK") -> DdnsResult.Updated(ipv4, ipv6, "DuckDNS 已更新")
-                    safe.startsWith("KO") -> DdnsResult.Failed("DuckDNS 更新失败：$safe")
+                    safe.startsWith("KO") -> DdnsResult.Failed("DuckDNS 更新失败：$safe", retryable = false)
                     else -> DdnsResult.Failed("DuckDNS 返回异常")
                 }
             }

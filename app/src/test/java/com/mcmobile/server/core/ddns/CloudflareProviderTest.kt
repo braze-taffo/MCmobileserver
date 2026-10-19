@@ -76,15 +76,163 @@ class CloudflareProviderTest {
         MockWebServer().use { server ->
             server.enqueue(MockResponse().setBody(records(record("rec-1"), record("rec-2"))))
             server.enqueue(MockResponse().setBody("""{"success":true}"""))
+            server.enqueue(MockResponse().setBody(records()))
             val result = provider(server).apply("203.0.113.11", null, config) as DdnsResult.Updated
+            assertEquals("203.0.113.11", result.ipv4)
+            assertNull(result.ipv6)
             assertTrue(result.detail.contains("多余"))
+            assertFalse(result.detail.contains("已删除"))
             assertEquals("GET", server.takeRequest().method)
             val patch = server.takeRequest()
             assertEquals("PATCH", patch.method)
             assertTrue(patch.path!!.contains("rec-1"))
             assertFalse(patch.path!!.contains("rec-2"))
             assertWrite(patch, "A", "203.0.113.11")
-            assertEquals(2, server.requestCount)
+            val aaaa = server.takeRequest()
+            assertEquals("GET", aaaa.method)
+            assertEquals("AAAA", aaaa.requestUrl?.queryParameter("type"))
+            assertEquals("mc.example.com", aaaa.requestUrl?.queryParameter("name"))
+            assertEquals(3, server.requestCount)
+        }
+    }
+
+    @Test fun ipv4OnlyDeletesStaleAaaa() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody(records()))
+            server.enqueue(MockResponse().setBody("""{"success":true,"result":{"id":"new"}}"""))
+            server.enqueue(MockResponse().setBody(records(
+                record("aaaa-1"),
+                record("aaaa-skip", "other.example.com"),
+                record("aaaa-2", "MC.example.com"),
+            )))
+            server.enqueue(MockResponse().setBody("""{"success":true}"""))
+            server.enqueue(MockResponse().setBody("""{"success":true}"""))
+            val result = provider(server).apply("203.0.113.20", "  ", config) as DdnsResult.Updated
+            assertEquals("203.0.113.20", result.ipv4)
+            assertNull(result.ipv6)
+            assertTrue(result.detail.contains("已删除过期 AAAA"))
+            val getA = server.takeRequest()
+            assertEquals("GET", getA.method)
+            assertEquals("A", getA.requestUrl?.queryParameter("type"))
+            val post = server.takeRequest()
+            assertEquals("POST", post.method)
+            assertWrite(post, "A", "203.0.113.20")
+            val getAAAA = server.takeRequest()
+            assertEquals("GET", getAAAA.method)
+            assertEquals("AAAA", getAAAA.requestUrl?.queryParameter("type"))
+            assertEquals("mc.example.com", getAAAA.requestUrl?.queryParameter("name"))
+            val first = server.takeRequest()
+            val second = server.takeRequest()
+            assertEquals("DELETE", first.method)
+            assertEquals("DELETE", second.method)
+            assertTrue(first.path!!.endsWith("/dns_records/aaaa-1"))
+            assertTrue(second.path!!.endsWith("/dns_records/aaaa-2"))
+            assertEquals("Bearer $token", first.getHeader("Authorization"))
+            assertEquals("Bearer $token", second.getHeader("Authorization"))
+            assertEquals(5, server.requestCount)
+        }
+    }
+
+    @Test fun ipv6OnlyDeletesStaleA() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody(records(record("aaaa-9"))))
+            server.enqueue(MockResponse().setBody("""{"success":true}"""))
+            server.enqueue(MockResponse().setBody(records(record("a-old"))))
+            server.enqueue(MockResponse().setBody("""{"success":true}"""))
+            val result = provider(server).apply(null, "2001:db8::20", config) as DdnsResult.Updated
+            assertNull(result.ipv4)
+            assertEquals("2001:db8::20", result.ipv6)
+            assertTrue(result.detail.contains("已删除过期 A"))
+            assertFalse(result.detail.contains("已删除过期 AAAA"))
+            assertEquals("AAAA", server.takeRequest().requestUrl?.queryParameter("type"))
+            val patch = server.takeRequest()
+            assertEquals("PATCH", patch.method)
+            assertTrue(patch.path!!.endsWith("/dns_records/aaaa-9"))
+            assertWrite(patch, "AAAA", "2001:db8::20")
+            val getA = server.takeRequest()
+            assertEquals("GET", getA.method)
+            assertEquals("A", getA.requestUrl?.queryParameter("type"))
+            assertEquals("mc.example.com", getA.requestUrl?.queryParameter("name"))
+            val delete = server.takeRequest()
+            assertEquals("DELETE", delete.method)
+            assertTrue(delete.path!!.endsWith("/dns_records/a-old"))
+            assertEquals(4, server.requestCount)
+        }
+    }
+
+    @Test fun absentFamilyWithNoRecordsOnlyLists() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody(records(record("rec-4"))))
+            server.enqueue(MockResponse().setBody("""{"success":true}"""))
+            server.enqueue(MockResponse().setBody(records()))
+            val result = provider(server).apply("203.0.113.21", null, config) as DdnsResult.Updated
+            assertEquals("203.0.113.21", result.ipv4)
+            assertNull(result.ipv6)
+            assertFalse(result.detail.contains("删除"))
+            val getA = server.takeRequest()
+            assertEquals("GET", getA.method)
+            assertEquals("A", getA.requestUrl?.queryParameter("type"))
+            val patch = server.takeRequest()
+            assertEquals("PATCH", patch.method)
+            assertTrue(patch.path!!.endsWith("/dns_records/rec-4"))
+            val listed = server.takeRequest()
+            assertEquals("GET", listed.method)
+            assertEquals("AAAA", listed.requestUrl?.queryParameter("type"))
+            assertEquals("mc.example.com", listed.requestUrl?.queryParameter("name"))
+            assertEquals(3, server.requestCount)
+        }
+    }
+
+    @Test fun noPublicAddressDoesNotDelete() = runBlocking {
+        MockWebServer().use { server ->
+            val failed = provider(server).apply(null, null, config) as DdnsResult.Failed
+            assertEquals("没有可用的公网地址", failed.message)
+            val blank = provider(server).apply("  ", "", config) as DdnsResult.Failed
+            assertEquals("没有可用的公网地址", blank.message)
+            assertEquals(0, server.requestCount)
+        }
+    }
+
+    @Test fun staleDeleteUsesHttpAndNetworkFailureSemantics() = runBlocking {
+        for (code in listOf(401, 403)) {
+            MockWebServer().use { server ->
+                server.enqueue(MockResponse().setBody(records()))
+                server.enqueue(MockResponse().setBody("""{"success":true}"""))
+                server.enqueue(MockResponse().setBody(records(record("aaaa-1"))))
+                server.enqueue(MockResponse().setResponseCode(code))
+                val failed = provider(server).apply("203.0.113.1", null, config) as DdnsResult.Failed
+                assertFalse(failed.retryable)
+                assertTrue(failed.credential)
+                assertTrue(failed.message.contains(code.toString()))
+                assertFalse(failed.message.contains(token))
+            }
+        }
+        for (code in listOf(429, 500)) {
+            MockWebServer().use { server ->
+                server.enqueue(MockResponse().setBody(records()))
+                server.enqueue(MockResponse().setBody("""{"success":true}"""))
+                server.enqueue(MockResponse().setBody(records(record("aaaa-1"))))
+                server.enqueue(MockResponse().setResponseCode(code))
+                val failed = provider(server).apply("203.0.113.1", null, config) as DdnsResult.Failed
+                assertTrue(code.toString(), failed.retryable)
+                assertFalse(failed.credential)
+                assertFalse(failed.message.contains(token))
+            }
+        }
+        MockWebServer().use { server ->
+            val http = OkHttpClient.Builder().addInterceptor { chain ->
+                if (chain.request().method == "DELETE") throw java.io.IOException("boom")
+                chain.proceed(chain.request())
+            }.build()
+            server.enqueue(MockResponse().setBody(records()))
+            server.enqueue(MockResponse().setBody("""{"success":true}"""))
+            server.enqueue(MockResponse().setBody(records(record("aaaa-1"))))
+            val failed = CloudflareProvider(http, server.url("/client/v4").toString())
+                .apply("203.0.113.1", null, config) as DdnsResult.Failed
+            assertTrue(failed.retryable)
+            assertFalse(failed.credential)
+            assertEquals("Cloudflare 网络失败", failed.message)
+            assertFalse(failed.message.contains(token))
         }
     }
 

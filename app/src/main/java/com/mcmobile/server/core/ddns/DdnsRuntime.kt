@@ -12,6 +12,7 @@ import com.mcmobile.server.core.net.PublicEndpoints
 import java.io.File
 import java.net.Inet6Address
 import java.util.concurrent.TimeUnit
+import javax.net.SocketFactory
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
@@ -59,7 +60,15 @@ object DdnsRuntime {
         scope: CoroutineScope,
         nics: () -> List<Inet6Address> = { nicsFromConnectivity(appContext) },
         detect: (OkHttpClient, List<Inet6Address>, List<String>) -> PublicEndpoints = { http, list, urls ->
-            PublicAddresses.detect(http, list, urls, userAgent = PublicAddresses.userAgent(versionOf(appContext)))
+            val echo = ipv4EchoForProbe
+            PublicAddresses.detect(
+                http,
+                list,
+                urls,
+                userAgent = PublicAddresses.userAgent(versionOf(appContext)),
+                ipv4SocketFactory = echo.socketFactory,
+                probeIpv4 = echo.enabled,
+            )
         },
         status: () -> String? = { ConsoleSession.state.value.serverStatus },
         clock: () -> Long = System::currentTimeMillis,
@@ -238,7 +247,7 @@ object DdnsRuntime {
                             lastError = if (decision.reason == DdnsUpdater.SKIP_UNCHANGED) null else mutableState.value.lastError,
                             secretsLost = loaded.secretsLost,
                         )
-                        sleep(intervalMs(config))
+                        sleep(ddnsSleepMs(intervalMs(config), clock(), updater.backoffUntilMs()))
                     }
                     is DdnsDecision.Apply -> {
                         val result = providerOf(config.provider).apply(decision.ipv4, decision.ipv6, config)
@@ -287,7 +296,7 @@ object DdnsRuntime {
                                 )
                             }
                         }
-                        sleep(intervalMs(config))
+                        sleep(ddnsSleepMs(intervalMs(config), clock(), updater.backoffUntilMs()))
                     }
                 }
             } catch (e: CancellationException) {
@@ -329,6 +338,27 @@ object DdnsRuntime {
 private const val idleMs = 3_000L
 
 /**
+ * Sleep the probe interval, but wake at a pending backoff deadline when that is sooner.
+ * A 1 minute retry must not wait out a long interval, and a backoff skip must not overshoot it.
+ */
+internal fun ddnsSleepMs(intervalMs: Long, nowMs: Long, backoffUntilMs: Long): Long {
+    if (backoffUntilMs <= nowMs) return intervalMs
+    return minOf(intervalMs, (backoffUntilMs - nowMs).coerceAtLeast(1L))
+}
+
+/** Same connectivity read as [nicsFromConnectivity]; IPv4 echo must bind to that network. */
+private var ipv4EchoForProbe: Ipv4Echo = Ipv4Echo(enabled = false)
+
+internal data class Ipv4Echo(
+    val enabled: Boolean,
+    val socketFactory: SocketFactory? = null,
+)
+
+/** [Ipv6NetworkPick.NONE] suppresses IPv4 echo so a VPN default route is not published. */
+internal fun ipv4EchoFor(pick: Ipv6NetworkPick, socketFactory: SocketFactory? = null): Ipv4Echo =
+    if (pick == Ipv6NetworkPick.NONE) Ipv4Echo(enabled = false) else Ipv4Echo(enabled = true, socketFactory = socketFactory)
+
+/**
  * Which network may supply an IPv6 address.
  * [ACTIVE] is the default network and is used even when it has no global address.
  * [UNDERLYING] is the single non-VPN network behind an active VPN.
@@ -349,39 +379,58 @@ internal fun pickIpv6Network(activePresent: Boolean, activeIsVpn: Boolean, under
  * A VPN is not published; its underlying network is used only when that network is unambiguous.
  */
 internal fun nicsFromConnectivity(context: Context): List<Inet6Address> {
-    val cm = runCatching { context.getSystemService(ConnectivityManager::class.java) }.getOrNull()
-        ?: return emptyList()
-    val candidates = runCatching { ipv6Candidates(cm) }.getOrDefault(emptyList())
-    val chosen = PublicAddresses.pickIpv6(candidates) ?: return emptyList()
-    return listOfNotNull(candidates.firstOrNull { PublicAddresses.hostOf(it.address) == chosen }?.address)
+    val route = echoRoute(context)
+    ipv4EchoForProbe = route.echo
+    return route.nics
 }
 
-private fun ipv6Candidates(cm: ConnectivityManager): List<Ipv6Candidate> {
-    return networksForAddresses(cm).flatMap { network ->
+private data class EchoRoute(val nics: List<Inet6Address>, val echo: Ipv4Echo)
+
+private data class ChosenNetworks(val pick: Ipv6NetworkPick, val networks: List<Network>)
+
+private fun echoRoute(context: Context): EchoRoute {
+    val disabled = EchoRoute(emptyList(), ipv4EchoFor(Ipv6NetworkPick.NONE))
+    val cm = runCatching { context.getSystemService(ConnectivityManager::class.java) }.getOrNull()
+        ?: return disabled
+    val chosen = runCatching { chosenNetworks(cm) }.getOrNull() ?: return disabled
+    val nics = runCatching { ipv6On(cm, chosen.networks) }.getOrDefault(emptyList())
+    val factory = if (chosen.pick == Ipv6NetworkPick.NONE) {
+        null
+    } else {
+        chosen.networks.singleOrNull()?.let { network -> runCatching { network.socketFactory }.getOrNull() }
+    }
+    return EchoRoute(nics, ipv4EchoFor(chosen.pick, factory))
+}
+
+private fun ipv6On(cm: ConnectivityManager, networks: List<Network>): List<Inet6Address> {
+    val candidates = networks.flatMap { network ->
         val links = runCatching { cm.getLinkProperties(network)?.linkAddresses }.getOrNull().orEmpty()
         links.mapNotNull { link ->
             val addr = link.address as? Inet6Address ?: return@mapNotNull null
             Ipv6Candidate(addr, link.flags)
         }
     }
+    val chosen = PublicAddresses.pickIpv6(candidates) ?: return emptyList()
+    return listOfNotNull(candidates.firstOrNull { PublicAddresses.hostOf(it.address) == chosen }?.address)
 }
 
-@Suppress("DEPRECATION") // getAllNetworks is the list API still available since the min SDK.
-private fun networksForAddresses(cm: ConnectivityManager): List<Network> {
+private fun chosenNetworks(cm: ConnectivityManager): ChosenNetworks {
     val active = runCatching { cm.activeNetwork }.getOrNull()
     val activeIsVpn = active?.let { network ->
         runCatching { cm.getNetworkCapabilities(network) }.getOrNull()
             ?.hasTransport(NetworkCapabilities.TRANSPORT_VPN)
     } == true
     val underlying = if (activeIsVpn) nonVpnInternetNetworks(cm) else emptyList()
-    return when (pickIpv6Network(active != null, activeIsVpn, underlying.size)) {
+    val pick = pickIpv6Network(active != null, activeIsVpn, underlying.size)
+    val networks = when (pick) {
         Ipv6NetworkPick.NONE -> emptyList()
         Ipv6NetworkPick.ACTIVE -> listOf(active!!)
         Ipv6NetworkPick.UNDERLYING -> underlying
     }
+    return ChosenNetworks(pick, networks)
 }
 
-@Suppress("DEPRECATION")
+@Suppress("DEPRECATION") // getAllNetworks is the list API still available since the min SDK.
 private fun nonVpnInternetNetworks(cm: ConnectivityManager): List<Network> {
     return runCatching { cm.allNetworks.toList() }.getOrDefault(emptyList()).filter { network ->
         val networkCaps = runCatching { cm.getNetworkCapabilities(network) }.getOrNull() ?: return@filter false

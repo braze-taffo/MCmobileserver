@@ -93,7 +93,7 @@ fun DdnsScreen(nav: NavController) {
     val successAt = if (live) runtime.lastSuccessAt else snapshot.lastSuccessAt
     val error = if (live) runtime.lastError else null
     val skipped = if (live) runtime.skipped else null
-    val secretsLost = snapshot.secretsLost || runtime.secretsLost
+    val secretsLost = showSecretsLost(snapshot.secretsLost, runtime.active, runtime.secretsLost)
     Scaffold(topBar = {
         TopAppBar(title = { Text("动态域名") }, navigationIcon = {
             IconButton(onClick = { nav.popBackStack() }) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "返回") }
@@ -241,6 +241,13 @@ private fun DdnsField(
         visualTransformation = if (secret) PasswordVisualTransformation() else VisualTransformation.None,
     )
 }
+
+/**
+ * A stopped loop keeps [com.mcmobile.server.core.ddns.DdnsState.secretsLost] after the user saves a new token.
+ * Hide that stale flag once the snapshot is clear, but keep the warning while the loop is still active and lost.
+ */
+internal fun showSecretsLost(snapshotLost: Boolean, runtimeActive: Boolean, runtimeLost: Boolean): Boolean =
+    snapshotLost || (runtimeActive && runtimeLost)
 
 /** Keep each provider's token. Switching must not submit the previous provider's credential. */
 internal fun switchDdnsProvider(

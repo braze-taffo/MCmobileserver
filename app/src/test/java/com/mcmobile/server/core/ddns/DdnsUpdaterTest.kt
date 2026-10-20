@@ -56,6 +56,7 @@ class DdnsUpdaterTest {
         val fp = base.fingerprint()
         assertTrue(updater.tick(0, v4, null, fp) is DdnsDecision.Apply)
         updater.onFailure(0, retryable = true, fp)
+        assertEquals(60_000L, updater.backoffUntilMs())
         assertTrue(updater.tick(59_999, v4, null, fp) is DdnsDecision.Skip)
         assertTrue(updater.tick(60_000, v4, null, fp) is DdnsDecision.Apply)
         updater.onFailure(60_000, retryable = true, fp)

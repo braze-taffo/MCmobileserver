@@ -3,6 +3,8 @@ package com.mcmobile.server.ui.ddns
 import com.mcmobile.server.core.ddns.DdnsConfig
 import com.mcmobile.server.core.ddns.DdnsProviderId
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class DdnsScreenTest {
@@ -28,5 +30,13 @@ class DdnsScreenTest {
         val (same, sameTokens) = switchDdnsProvider(again, afterBack, DdnsProviderId.DUCKDNS)
         assertEquals(again, same)
         assertEquals(afterBack, sameTokens)
+    }
+
+    @Test fun savedSnapshotIgnoresInactiveRuntimeSecretsLost() {
+        assertTrue(showSecretsLost(snapshotLost = true, runtimeActive = false, runtimeLost = true))
+        assertFalse(showSecretsLost(snapshotLost = false, runtimeActive = false, runtimeLost = true))
+        assertTrue(showSecretsLost(snapshotLost = false, runtimeActive = true, runtimeLost = true))
+        assertFalse(showSecretsLost(snapshotLost = false, runtimeActive = true, runtimeLost = false))
+        assertFalse(showSecretsLost(snapshotLost = false, runtimeActive = false, runtimeLost = false))
     }
 }

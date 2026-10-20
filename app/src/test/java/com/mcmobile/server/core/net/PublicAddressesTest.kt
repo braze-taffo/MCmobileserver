@@ -2,6 +2,8 @@ package com.mcmobile.server.core.net
 
 import java.net.Inet6Address
 import java.net.InetAddress
+import java.net.Socket
+import javax.net.SocketFactory
 import okhttp3.OkHttpClient
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
@@ -120,5 +122,60 @@ class PublicAddressesTest {
             assertNull(found.ipv4)
             assertNull(found.ipv6)
         }
+    }
+
+    @Test fun detectSkipsIpv4EchoWhenNoUnderlyingNetwork() {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody("203.0.113.8\n"))
+            val factory = CountingSocketFactory()
+            val nics = listOf(v6("2001:db8::5"))
+            val found = PublicAddresses.detect(
+                OkHttpClient(),
+                nics,
+                listOf(server.url("/echo").toString()),
+                ipv4SocketFactory = factory,
+                probeIpv4 = false,
+            )
+            assertNull(found.ipv4)
+            assertEquals(PublicAddresses.hostOf(nics.single()), found.ipv6)
+            assertEquals(0, server.requestCount)
+            assertEquals(0, factory.created)
+        }
+    }
+
+    @Test fun detectBindsIpv4EchoToTheGivenSocketFactory() {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody("203.0.113.8\n"))
+            val factory = CountingSocketFactory()
+            val found = PublicAddresses.detect(
+                OkHttpClient(),
+                emptyList(),
+                listOf(server.url("/echo").toString()),
+                ipv4SocketFactory = factory,
+                probeIpv4 = true,
+            )
+            assertEquals("203.0.113.8", found.ipv4)
+            assertNull(found.ipv6)
+            assertEquals(1, server.requestCount)
+            assertTrue(factory.created > 0)
+        }
+    }
+
+    private class CountingSocketFactory : SocketFactory() {
+        var created = 0
+            private set
+        private val delegate = getDefault()
+
+        override fun createSocket(): Socket = delegate.createSocket().also { created++ }
+
+        override fun createSocket(host: String?, port: Int): Socket = delegate.createSocket(host, port).also { created++ }
+
+        override fun createSocket(host: String?, port: Int, localHost: InetAddress?, localPort: Int): Socket =
+            delegate.createSocket(host, port, localHost, localPort).also { created++ }
+
+        override fun createSocket(host: InetAddress?, port: Int): Socket = delegate.createSocket(host, port).also { created++ }
+
+        override fun createSocket(address: InetAddress?, port: Int, localAddress: InetAddress?, localPort: Int): Socket =
+            delegate.createSocket(address, port, localAddress, localPort).also { created++ }
     }
 }

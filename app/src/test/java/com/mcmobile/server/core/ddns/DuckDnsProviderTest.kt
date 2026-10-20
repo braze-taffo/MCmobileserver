@@ -18,7 +18,7 @@ class DuckDnsProviderTest {
         intervalSec = 60,
     )
 
-    @Test fun okUpdatesAndOmitsEmptyFamilies() = runBlocking {
+    @Test fun ipv6OnlySendsIpv6AndDoesNotAutodetectA() = runBlocking {
         MockWebServer().use { server ->
             server.enqueue(MockResponse().setBody("OK\n2001:db8::5\n"))
             val provider = DuckDnsProvider(OkHttpClient(), server.url("/update").toString())
@@ -32,7 +32,20 @@ class DuckDnsProviderTest {
             assertEquals(token, url.queryParameter("token"))
             assertEquals("true", url.queryParameter("verbose"))
             assertEquals("2001:db8::5", url.queryParameter("ipv6"))
-            assertNull(url.queryParameter("ip"))
+            // Spec: ipv6 disables ip autodetect, so omitting ip keeps the existing A. clear would wipe both.
+            assertEquals(setOf("domains", "token", "verbose", "ipv6"), url.queryParameterNames)
+        }
+    }
+
+    @Test fun ipv4OnlySendsIpAndOmitsIpv6() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody("OK\n203.0.113.5\n"))
+            val provider = DuckDnsProvider(OkHttpClient(), server.url("/update").toString())
+            val result = provider.apply("203.0.113.5", " ", config) as DdnsResult.Updated
+            assertEquals("203.0.113.5", result.ipv4)
+            val url = server.takeRequest().requestUrl!!
+            assertEquals("203.0.113.5", url.queryParameter("ip"))
+            assertEquals(setOf("domains", "token", "verbose", "ip"), url.queryParameterNames)
         }
     }
 
@@ -50,6 +63,21 @@ class DuckDnsProviderTest {
             val url = server.takeRequest().requestUrl!!
             assertEquals("203.0.113.5", url.queryParameter("ip"))
             assertEquals("2001:db8::5", url.queryParameter("ipv6"))
+            assertEquals(setOf("domains", "token", "verbose", "ip", "ipv6"), url.queryParameterNames)
+        }
+    }
+
+    @Test fun requestTimeoutIsRetryable() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setResponseCode(408))
+            // OkHttp retries 408 once when retryOnConnectionFailure is left on.
+            val http = OkHttpClient.Builder().retryOnConnectionFailure(false).build()
+            val failed = DuckDnsProvider(http, server.url("/update").toString())
+                .apply("203.0.113.5", null, config) as DdnsResult.Failed
+            assertTrue(failed.retryable)
+            assertFalse(failed.credential)
+            assertTrue(failed.message.contains("408"))
+            assertEquals(1, server.requestCount)
         }
     }
 

@@ -39,6 +39,7 @@ class CloudflareProvider(
             if (!ipv4.isNullOrBlank()) add("A" to ipv4)
             if (!ipv6.isNullOrBlank()) add("AAAA" to ipv6)
         }
+        // A missing family is a probe gap, not proof the address is gone. Leave that record alone.
         for ((type, ip) in present) {
             when (val one = upsert(type, ip, zone, name, config.token)) {
                 is DdnsResult.Failed -> return@withContext one
@@ -46,17 +47,6 @@ class CloudflareProvider(
                     details += one.detail
                     if (type == "A") wrote4 = ip else wrote6 = ip
                 }
-                else -> return@withContext DdnsResult.Failed("Cloudflare 更新失败")
-            }
-        }
-        val absent = buildList {
-            if (ipv4.isNullOrBlank()) add("A")
-            if (ipv6.isNullOrBlank()) add("AAAA")
-        }
-        for (type in absent) {
-            when (val one = deleteFamily(type, zone, name, config.token)) {
-                is DdnsResult.Failed -> return@withContext one
-                is DdnsResult.Updated -> if (one.detail.isNotBlank()) details += one.detail
                 else -> return@withContext DdnsResult.Failed("Cloudflare 更新失败")
             }
         }
@@ -78,7 +68,7 @@ class CloudflareProvider(
         return try {
             http.newCall(call.build()).execute().use { response ->
                 httpFailure(response.code)?.let { return it }
-                rejectedWrite(response.body?.string().orEmpty(), type)?.let { return it }
+                rejectedEnvelope(response.body?.string().orEmpty(), "$type 更新")?.let { return it }
             }
             DdnsResult.Updated(if (type == "A") ip else null, if (type == "AAAA") ip else null, "$type 已更新$extra")
         } catch (e: CancellationException) {
@@ -88,8 +78,11 @@ class CloudflareProvider(
         }
     }
 
-    /** Drop every exact A or AAAA left behind after that family is no longer detected. */
-    private fun deleteFamily(type: String, zone: String, name: String, token: String): DdnsResult {
+    /**
+     * Drop every exact A or AAAA. [apply] does not call this for a missed probe:
+     * null means "unknown right now", and deleting would remove a record that still works.
+     */
+    internal fun deleteFamily(type: String, zone: String, name: String, token: String): DdnsResult {
         val exact = when (val listed = listed(type, zone, name, token)) {
             is ListResult.Failed -> return listed.error
             is ListResult.Ok -> listed.records.filter { it.id.isNotBlank() }
@@ -99,6 +92,7 @@ class CloudflareProvider(
             try {
                 http.newCall(request(recordsUrl(zone, id = record.id), token).delete().build()).execute().use { response ->
                     httpFailure(response.code)?.let { return it }
+                    rejectedEnvelope(response.body?.string().orEmpty(), "删除")?.let { return it }
                 }
             } catch (e: CancellationException) {
                 throw e
@@ -147,17 +141,6 @@ class CloudflareProvider(
     private fun payload(type: String, name: String, ip: String) =
         json.encodeToString(CfBody(type, name, ip)).toRequestBody(JSON)
 
-    private fun rejectedWrite(body: String, type: String): DdnsResult.Failed? {
-        if (body.isBlank()) return DdnsResult.Failed("Cloudflare 响应为空", retryable = true)
-        val obj = runCatching { json.parseToJsonElement(body).jsonObject }.getOrNull()
-            ?: return DdnsResult.Failed("Cloudflare 响应无法解析", retryable = true)
-        return when (obj["success"]?.jsonPrimitive?.booleanOrNull) {
-            true -> null
-            false -> DdnsResult.Failed("Cloudflare 拒绝了$type 更新", retryable = false)
-            null -> DdnsResult.Failed("Cloudflare 响应无法解析", retryable = true)
-        }
-    }
-
     private fun parseRecords(body: String): List<CfRecord> {
         val obj = json.parseToJsonElement(body).jsonObject
         val ok = obj["success"]?.jsonPrimitive?.booleanOrNull ?: false
@@ -178,9 +161,21 @@ class CloudflareProvider(
         private val JSON = "application/json".toMediaType()
         private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
 
+        /** 2xx with a Cloudflare envelope. `success != true` is not a successful write or delete. */
+        internal fun rejectedEnvelope(body: String, action: String): DdnsResult.Failed? {
+            if (body.isBlank()) return DdnsResult.Failed("Cloudflare 响应为空", retryable = true)
+            val obj = runCatching { json.parseToJsonElement(body).jsonObject }.getOrNull()
+                ?: return DdnsResult.Failed("Cloudflare 响应无法解析", retryable = true)
+            return when (obj["success"]?.jsonPrimitive?.booleanOrNull) {
+                true -> null
+                false -> DdnsResult.Failed("Cloudflare 拒绝了$action", retryable = false)
+                null -> DdnsResult.Failed("Cloudflare 响应无法解析", retryable = true)
+            }
+        }
+
         private fun httpFailure(code: Int): DdnsResult.Failed? {
             if (code in 200..299) return null
-            val retryable = code == 429 || code >= 500
+            val retryable = code == 408 || code == 429 || code >= 500
             val credential = code == 401 || code == 403
             val message = when (code) {
                 401, 403 -> "Cloudflare 凭据被拒绝（$code）"

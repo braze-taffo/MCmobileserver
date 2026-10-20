@@ -76,7 +76,6 @@ class CloudflareProviderTest {
         MockWebServer().use { server ->
             server.enqueue(MockResponse().setBody(records(record("rec-1"), record("rec-2"))))
             server.enqueue(MockResponse().setBody("""{"success":true}"""))
-            server.enqueue(MockResponse().setBody(records()))
             val result = provider(server).apply("203.0.113.11", null, config) as DdnsResult.Updated
             assertEquals("203.0.113.11", result.ipv4)
             assertNull(result.ipv6)
@@ -88,83 +87,59 @@ class CloudflareProviderTest {
             assertTrue(patch.path!!.contains("rec-1"))
             assertFalse(patch.path!!.contains("rec-2"))
             assertWrite(patch, "A", "203.0.113.11")
-            val aaaa = server.takeRequest()
-            assertEquals("GET", aaaa.method)
-            assertEquals("AAAA", aaaa.requestUrl?.queryParameter("type"))
-            assertEquals("mc.example.com", aaaa.requestUrl?.queryParameter("name"))
-            assertEquals(3, server.requestCount)
+            assertEquals(2, server.requestCount)
         }
     }
 
-    @Test fun ipv4OnlyDeletesStaleAaaa() = runBlocking {
+    @Test fun ipv4OnlyUpdatesAAndLeavesAaaa() = runBlocking {
         MockWebServer().use { server ->
             server.enqueue(MockResponse().setBody(records()))
             server.enqueue(MockResponse().setBody("""{"success":true,"result":{"id":"new"}}"""))
-            server.enqueue(MockResponse().setBody(records(
-                record("aaaa-1"),
-                record("aaaa-skip", "other.example.com"),
-                record("aaaa-2", "MC.example.com"),
-            )))
-            server.enqueue(MockResponse().setBody("""{"success":true}"""))
-            server.enqueue(MockResponse().setBody("""{"success":true}"""))
             val result = provider(server).apply("203.0.113.20", "  ", config) as DdnsResult.Updated
             assertEquals("203.0.113.20", result.ipv4)
             assertNull(result.ipv6)
-            assertTrue(result.detail.contains("已删除过期 AAAA"))
+            assertFalse(result.detail.contains("删除"))
+            assertFalse(result.detail.contains("AAAA"))
             val getA = server.takeRequest()
             assertEquals("GET", getA.method)
             assertEquals("A", getA.requestUrl?.queryParameter("type"))
             val post = server.takeRequest()
             assertEquals("POST", post.method)
             assertWrite(post, "A", "203.0.113.20")
-            val getAAAA = server.takeRequest()
-            assertEquals("GET", getAAAA.method)
-            assertEquals("AAAA", getAAAA.requestUrl?.queryParameter("type"))
-            assertEquals("mc.example.com", getAAAA.requestUrl?.queryParameter("name"))
-            val first = server.takeRequest()
-            val second = server.takeRequest()
-            assertEquals("DELETE", first.method)
-            assertEquals("DELETE", second.method)
-            assertTrue(first.path!!.endsWith("/dns_records/aaaa-1"))
-            assertTrue(second.path!!.endsWith("/dns_records/aaaa-2"))
-            assertEquals("Bearer $token", first.getHeader("Authorization"))
-            assertEquals("Bearer $token", second.getHeader("Authorization"))
-            assertEquals(5, server.requestCount)
+            assertEquals(2, server.requestCount)
+            assertNotEquals("DELETE", getA.method)
+            assertNotEquals("DELETE", post.method)
+            assertNotEquals("AAAA", getA.requestUrl?.queryParameter("type"))
         }
     }
 
-    @Test fun ipv6OnlyDeletesStaleA() = runBlocking {
+    @Test fun ipv6OnlyUpdatesAaaaAndLeavesA() = runBlocking {
         MockWebServer().use { server ->
             server.enqueue(MockResponse().setBody(records(record("aaaa-9"))))
-            server.enqueue(MockResponse().setBody("""{"success":true}"""))
-            server.enqueue(MockResponse().setBody(records(record("a-old"))))
             server.enqueue(MockResponse().setBody("""{"success":true}"""))
             val result = provider(server).apply(null, "2001:db8::20", config) as DdnsResult.Updated
             assertNull(result.ipv4)
             assertEquals("2001:db8::20", result.ipv6)
-            assertTrue(result.detail.contains("已删除过期 A"))
-            assertFalse(result.detail.contains("已删除过期 AAAA"))
-            assertEquals("AAAA", server.takeRequest().requestUrl?.queryParameter("type"))
+            assertFalse(result.detail.contains("删除"))
+            assertFalse(result.detail.contains("已删除过期 A"))
+            val getAaaa = server.takeRequest()
+            assertEquals("GET", getAaaa.method)
+            assertEquals("AAAA", getAaaa.requestUrl?.queryParameter("type"))
             val patch = server.takeRequest()
             assertEquals("PATCH", patch.method)
             assertTrue(patch.path!!.endsWith("/dns_records/aaaa-9"))
             assertWrite(patch, "AAAA", "2001:db8::20")
-            val getA = server.takeRequest()
-            assertEquals("GET", getA.method)
-            assertEquals("A", getA.requestUrl?.queryParameter("type"))
-            assertEquals("mc.example.com", getA.requestUrl?.queryParameter("name"))
-            val delete = server.takeRequest()
-            assertEquals("DELETE", delete.method)
-            assertTrue(delete.path!!.endsWith("/dns_records/a-old"))
-            assertEquals(4, server.requestCount)
+            assertEquals(2, server.requestCount)
+            assertNotEquals("DELETE", getAaaa.method)
+            assertNotEquals("DELETE", patch.method)
+            assertNotEquals("A", getAaaa.requestUrl?.queryParameter("type"))
         }
     }
 
-    @Test fun absentFamilyWithNoRecordsOnlyLists() = runBlocking {
+    @Test fun absentFamilyIsNotListedOrDeleted() = runBlocking {
         MockWebServer().use { server ->
             server.enqueue(MockResponse().setBody(records(record("rec-4"))))
             server.enqueue(MockResponse().setBody("""{"success":true}"""))
-            server.enqueue(MockResponse().setBody(records()))
             val result = provider(server).apply("203.0.113.21", null, config) as DdnsResult.Updated
             assertEquals("203.0.113.21", result.ipv4)
             assertNull(result.ipv6)
@@ -175,11 +150,7 @@ class CloudflareProviderTest {
             val patch = server.takeRequest()
             assertEquals("PATCH", patch.method)
             assertTrue(patch.path!!.endsWith("/dns_records/rec-4"))
-            val listed = server.takeRequest()
-            assertEquals("GET", listed.method)
-            assertEquals("AAAA", listed.requestUrl?.queryParameter("type"))
-            assertEquals("mc.example.com", listed.requestUrl?.queryParameter("name"))
-            assertEquals(3, server.requestCount)
+            assertEquals(2, server.requestCount)
         }
     }
 
@@ -193,14 +164,49 @@ class CloudflareProviderTest {
         }
     }
 
-    @Test fun staleDeleteUsesHttpAndNetworkFailureSemantics() = runBlocking {
+    @Test fun deleteFamilyRemovesExactNameMatchesOnly() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody(records(
+                record("aaaa-1"),
+                record("aaaa-skip", "other.example.com"),
+                record("aaaa-2", "MC.example.com"),
+            )))
+            server.enqueue(MockResponse().setBody("""{"success":true}"""))
+            server.enqueue(MockResponse().setBody("""{"success":true}"""))
+            val result = provider(server).deleteFamily("AAAA", config.cloudflareZoneId, "mc.example.com", token) as DdnsResult.Updated
+            assertEquals("已删除过期 AAAA", result.detail)
+            val get = server.takeRequest()
+            assertEquals("GET", get.method)
+            assertEquals("AAAA", get.requestUrl?.queryParameter("type"))
+            assertEquals("mc.example.com", get.requestUrl?.queryParameter("name"))
+            val first = server.takeRequest()
+            val second = server.takeRequest()
+            assertEquals("DELETE", first.method)
+            assertEquals("DELETE", second.method)
+            assertTrue(first.path!!.endsWith("/dns_records/aaaa-1"))
+            assertTrue(second.path!!.endsWith("/dns_records/aaaa-2"))
+            assertEquals("Bearer $token", first.getHeader("Authorization"))
+            assertEquals("Bearer $token", second.getHeader("Authorization"))
+            assertEquals(3, server.requestCount)
+        }
+    }
+
+    @Test fun deleteFamilyWithNoRecordsDoesNotDelete() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody(records()))
+            val result = provider(server).deleteFamily("A", config.cloudflareZoneId, config.cloudflareRecord, token) as DdnsResult.Updated
+            assertEquals("", result.detail)
+            assertEquals("GET", server.takeRequest().method)
+            assertEquals(1, server.requestCount)
+        }
+    }
+
+    @Test fun deleteFamilyChecksStatusEnvelopeAndNetwork() = runBlocking {
         for (code in listOf(401, 403)) {
             MockWebServer().use { server ->
-                server.enqueue(MockResponse().setBody(records()))
-                server.enqueue(MockResponse().setBody("""{"success":true}"""))
                 server.enqueue(MockResponse().setBody(records(record("aaaa-1"))))
                 server.enqueue(MockResponse().setResponseCode(code))
-                val failed = provider(server).apply("203.0.113.1", null, config) as DdnsResult.Failed
+                val failed = provider(server).deleteFamily("AAAA", config.cloudflareZoneId, config.cloudflareRecord, token) as DdnsResult.Failed
                 assertFalse(failed.retryable)
                 assertTrue(failed.credential)
                 assertTrue(failed.message.contains(code.toString()))
@@ -209,31 +215,74 @@ class CloudflareProviderTest {
         }
         for (code in listOf(429, 500)) {
             MockWebServer().use { server ->
-                server.enqueue(MockResponse().setBody(records()))
-                server.enqueue(MockResponse().setBody("""{"success":true}"""))
                 server.enqueue(MockResponse().setBody(records(record("aaaa-1"))))
                 server.enqueue(MockResponse().setResponseCode(code))
-                val failed = provider(server).apply("203.0.113.1", null, config) as DdnsResult.Failed
+                val failed = provider(server).deleteFamily("AAAA", config.cloudflareZoneId, config.cloudflareRecord, token) as DdnsResult.Failed
                 assertTrue(code.toString(), failed.retryable)
                 assertFalse(failed.credential)
                 assertFalse(failed.message.contains(token))
             }
         }
         MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody(records(record("a-1"))))
+            server.enqueue(MockResponse().setResponseCode(408))
+            val http = OkHttpClient.Builder().retryOnConnectionFailure(false).build()
+            val failed = CloudflareProvider(http, server.url("/client/v4").toString())
+                .deleteFamily("A", config.cloudflareZoneId, config.cloudflareRecord, token) as DdnsResult.Failed
+            assertTrue(failed.retryable)
+            assertFalse(failed.credential)
+            assertTrue(failed.message.contains("408"))
+            assertEquals(2, server.requestCount)
+        }
+        for (body in listOf("", "OK", "null", """{"result":1}""")) {
+            MockWebServer().use { server ->
+                server.enqueue(MockResponse().setBody(records(record("a-1"))))
+                server.enqueue(MockResponse().setResponseCode(200).setBody(body))
+                val failed = provider(server).deleteFamily("A", config.cloudflareZoneId, config.cloudflareRecord, token) as DdnsResult.Failed
+                assertTrue(body, failed.retryable)
+                assertFalse(failed.message.contains("已删除"))
+                assertFalse(failed.message.contains(token))
+            }
+        }
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody(records(record("a-1"))))
+            server.enqueue(MockResponse().setResponseCode(200).setBody("""{"success":false}"""))
+            val failed = provider(server).deleteFamily("A", config.cloudflareZoneId, config.cloudflareRecord, token) as DdnsResult.Failed
+            assertFalse(failed.retryable)
+            assertFalse(failed.credential)
+            assertEquals("Cloudflare 拒绝了删除", failed.message)
+        }
+        MockWebServer().use { server ->
             val http = OkHttpClient.Builder().addInterceptor { chain ->
                 if (chain.request().method == "DELETE") throw java.io.IOException("boom")
                 chain.proceed(chain.request())
             }.build()
-            server.enqueue(MockResponse().setBody(records()))
-            server.enqueue(MockResponse().setBody("""{"success":true}"""))
             server.enqueue(MockResponse().setBody(records(record("aaaa-1"))))
             val failed = CloudflareProvider(http, server.url("/client/v4").toString())
-                .apply("203.0.113.1", null, config) as DdnsResult.Failed
+                .deleteFamily("AAAA", config.cloudflareZoneId, config.cloudflareRecord, token) as DdnsResult.Failed
             assertTrue(failed.retryable)
             assertFalse(failed.credential)
             assertEquals("Cloudflare 网络失败", failed.message)
             assertFalse(failed.message.contains(token))
         }
+    }
+
+    @Test fun rejectedEnvelopeMatchesWriteAndDeleteWording() {
+        val empty = CloudflareProvider.rejectedEnvelope("", "删除")!!
+        assertTrue(empty.retryable)
+        assertEquals("Cloudflare 响应为空", empty.message)
+        val broken = CloudflareProvider.rejectedEnvelope("OK", "删除")!!
+        assertTrue(broken.retryable)
+        assertEquals("Cloudflare 响应无法解析", broken.message)
+        val missing = CloudflareProvider.rejectedEnvelope("""{"result":{"id":"x"}}""", "删除")!!
+        assertTrue(missing.retryable)
+        val denied = CloudflareProvider.rejectedEnvelope("""{"success":false}""", "删除")!!
+        assertFalse(denied.retryable)
+        assertEquals("Cloudflare 拒绝了删除", denied.message)
+        val update = CloudflareProvider.rejectedEnvelope("""{"success":false}""", "A 更新")!!
+        assertFalse(update.retryable)
+        assertEquals("Cloudflare 拒绝了A 更新", update.message)
+        assertNull(CloudflareProvider.rejectedEnvelope("""{"success":true}""", "删除"))
     }
 
     @Test fun authFailuresAreNotRetryableAndOmitToken() = runBlocking {
@@ -258,6 +307,20 @@ class CloudflareProviderTest {
                 assertTrue(failed.retryable)
                 assertFalse(failed.message.contains(token))
             }
+        }
+    }
+
+    @Test fun requestTimeoutIsRetryable() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setResponseCode(408))
+            // OkHttp retries 408 once when retryOnConnectionFailure is left on.
+            val http = OkHttpClient.Builder().retryOnConnectionFailure(false).build()
+            val failed = CloudflareProvider(http, server.url("/client/v4").toString())
+                .apply("203.0.113.1", null, config) as DdnsResult.Failed
+            assertTrue(failed.retryable)
+            assertFalse(failed.credential)
+            assertTrue(failed.message.contains("408"))
+            assertEquals(1, server.requestCount)
         }
     }
 

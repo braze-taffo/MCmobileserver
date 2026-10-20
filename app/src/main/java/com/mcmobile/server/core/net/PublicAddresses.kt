@@ -4,6 +4,7 @@ import java.net.Inet4Address
 import java.net.Inet6Address
 import java.net.InetAddress
 import java.util.concurrent.TimeUnit
+import javax.net.SocketFactory
 import okhttp3.OkHttpClient
 import okhttp3.Request
 
@@ -80,17 +81,25 @@ object PublicAddresses {
         return bare
     }
 
+    /**
+     * [probeIpv4] false skips echo when the underlying network is ambiguous, so a VPN egress is not published.
+     * [ipv4SocketFactory] binds that echo to the same network IPv6 was read from.
+     */
     fun detect(
         http: OkHttpClient,
         nics: List<Inet6Address>,
         echoUrls: List<String> = DEFAULT_ECHO_URLS,
         userAgent: String = userAgent(),
+        ipv4SocketFactory: SocketFactory? = null,
+        probeIpv4: Boolean = true,
     ): PublicEndpoints {
         val ipv6 = pickIpv6(nics.map { Ipv6Candidate(it) })
+        if (!probeIpv4) return PublicEndpoints(null, ipv6)
         val client = http.newBuilder()
             .connectTimeout(5, TimeUnit.SECONDS)
             .readTimeout(5, TimeUnit.SECONDS)
             .callTimeout(8, TimeUnit.SECONDS)
+            .apply { if (ipv4SocketFactory != null) socketFactory(ipv4SocketFactory) }
             .build()
         var ipv4: String? = null
         for (url in echoUrls) {

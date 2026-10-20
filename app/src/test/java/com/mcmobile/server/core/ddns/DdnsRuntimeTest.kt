@@ -328,6 +328,47 @@ class DdnsRuntimeTest {
         assertEquals(DdnsUpdater.SKIP_UNCHANGED, DdnsRuntime.state.value.skipped)
     }
 
+    @Test fun retryableFailureSleepsUntilBackoffInsteadOfInterval() = runBlocking {
+        var now = 1_000_000L
+        val sleeps = mutableListOf<Long>()
+        val applies = AtomicInteger()
+        val provider = counting(applies) { _, _ ->
+            DdnsResult.Failed("临时失败", retryable = true)
+        }
+        val job = runLoop(
+            scope(),
+            webhook().copy(intervalSec = 600),
+            provider = provider,
+            clock = { now },
+            sleep = { ms ->
+                sleeps += ms
+                now += ms
+            },
+            maxLoops = 4,
+        )
+        withTimeout(5_000) { job.join() }
+        assertEquals(3, applies.get())
+        assertEquals(listOf(60_000L, 300_000L, 600_000L, 300_000L), sleeps)
+        assertEquals(DdnsUpdater.SKIP_BACKOFF, DdnsRuntime.state.value.skipped)
+        assertEquals(60_000L, ddnsSleepMs(600_000L, 1_000L, 61_000L))
+        assertEquals(600_000L, ddnsSleepMs(600_000L, 1_000L, 0L))
+        assertEquals(1L, ddnsSleepMs(600_000L, 5_000L, 5_001L))
+        assertEquals(30_000L, ddnsSleepMs(30_000L, 0L, 90_000L))
+    }
+
+    @Test fun ipv4ProbeFollowsTheSameNetworkPickAsIpv6() {
+        val factory = javax.net.SocketFactory.getDefault()
+        val none = ipv4EchoFor(Ipv6NetworkPick.NONE, factory)
+        assertFalse(none.enabled)
+        assertNull(none.socketFactory)
+        val active = ipv4EchoFor(Ipv6NetworkPick.ACTIVE, factory)
+        assertTrue(active.enabled)
+        assertSame(factory, active.socketFactory)
+        val underlying = ipv4EchoFor(Ipv6NetworkPick.UNDERLYING, factory)
+        assertTrue(underlying.enabled)
+        assertSame(factory, underlying.socketFactory)
+    }
+
     @Test fun activeNetworkWithoutIpv6IsNotReplacedByOtherInterfaces() {
         assertEquals(Ipv6NetworkPick.NONE, pickIpv6Network(activePresent = false, activeIsVpn = false, underlyingCount = 3))
         assertEquals(Ipv6NetworkPick.ACTIVE, pickIpv6Network(activePresent = true, activeIsVpn = false, underlyingCount = 0))

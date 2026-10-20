@@ -10,7 +10,7 @@ class DdnsUpdater(
     private var lastIpv6: String? = null,
     private var lastFingerprint: String? = null,
 ) {
-    private var backoffUntilMs = 0L
+    private var backoffUntil = 0L
     private var backoffStep = 0
     /** Fingerprint of the attempt that scheduled [backoffUntilMs]. Not the last success. */
     private var backoffFingerprint: String? = null
@@ -33,9 +33,12 @@ class DdnsUpdater(
             return DdnsDecision.Skip(SKIP_UNCHANGED)
         }
         if (ipv4 == null && ipv6 == null) return DdnsDecision.Skip(SKIP_NO_ADDRESS)
-        if (nowMs < backoffUntilMs) return DdnsDecision.Skip(SKIP_BACKOFF)
+        if (nowMs < backoffUntil) return DdnsDecision.Skip(SKIP_BACKOFF)
         return DdnsDecision.Apply(ipv4, ipv6, fingerprint)
     }
+
+    /** Epoch millis when a retryable failure may be tried again. 0 when no backoff is pending. */
+    fun backoffUntilMs(): Long = backoffUntil
 
     fun onSuccess(ipv4: String?, ipv6: String?, fingerprint: String) {
         lastIpv4 = ipv4
@@ -53,13 +56,13 @@ class DdnsUpdater(
             return
         }
         backoffFingerprint = fingerprint
-        backoffUntilMs = nowMs + DELAYS[backoffStep.coerceAtMost(DELAYS.lastIndex)]
+        backoffUntil = nowMs + DELAYS[backoffStep.coerceAtMost(DELAYS.lastIndex)]
         backoffStep = (backoffStep + 1).coerceAtMost(DELAYS.lastIndex)
     }
 
     private fun clearBackoff() {
         backoffStep = 0
-        backoffUntilMs = 0L
+        backoffUntil = 0L
         backoffFingerprint = null
     }
 

@@ -22,10 +22,7 @@ class DuckDnsProvider(
                 .addQueryParameter("domains", config.duckSubdomain.trim())
                 .addQueryParameter("token", config.token)
                 .addQueryParameter("verbose", "true")
-                .apply {
-                    if (!ipv4.isNullOrBlank()) addQueryParameter("ip", ipv4)
-                    if (!ipv6.isNullOrBlank()) addQueryParameter("ipv6", ipv6)
-                }
+                .apply { addDuckAddresses(ipv4, ipv6) }
                 .build()
         } catch (_: Exception) {
             return@withContext DdnsResult.Failed("DuckDNS 地址无效", retryable = false)
@@ -44,7 +41,7 @@ class DuckDnsProvider(
                 if (!response.isSuccessful) {
                     return@withContext DdnsResult.Failed(
                         if (safe.isBlank()) "DuckDNS 请求失败（${response.code}）" else "DuckDNS 更新失败：$safe",
-                        retryable = response.code == 429 || response.code >= 500,
+                        retryable = response.code == 408 || response.code == 429 || response.code >= 500,
                     )
                 }
                 when {
@@ -58,6 +55,16 @@ class DuckDnsProvider(
         } catch (_: IOException) {
             DdnsResult.Failed("DuckDNS 网络失败")
         }
+    }
+
+    /**
+     * DuckDNS spec: a blank `ip` autodetects the request's IPv4, unless `ipv6` is set, which
+     * disables that autodetect. A missed family is no-update — IPv6-only sends `ipv6` and omits
+     * `ip` (keeps A); IPv4-only sends `ip` and omits `ipv6` (keeps AAAA). `clear=true` wipes both.
+     */
+    private fun okhttp3.HttpUrl.Builder.addDuckAddresses(ipv4: String?, ipv6: String?) {
+        if (!ipv4.isNullOrBlank()) addQueryParameter("ip", ipv4)
+        if (!ipv6.isNullOrBlank()) addQueryParameter("ipv6", ipv6)
     }
 
     companion object {

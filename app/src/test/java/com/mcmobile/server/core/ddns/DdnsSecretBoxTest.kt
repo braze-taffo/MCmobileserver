@@ -14,6 +14,7 @@ import org.junit.Test
 class DdnsSecretBoxTest {
     private class MemoryKv : Kv {
         private val map = linkedMapOf<String, String>()
+        override fun snapshot(): Map<String, String> = map.toMap()
         override fun get(k: String): String? = map[k]
         override fun put(k: String, v: String) { map[k] = v }
         fun contains(k: String) = k in map
@@ -22,6 +23,7 @@ class DdnsSecretBoxTest {
     private class BatchKv : Kv {
         val writes = mutableListOf<Map<String, String>>()
         private val map = linkedMapOf<String, String>()
+        override fun snapshot(): Map<String, String> = map.toMap()
         override fun get(k: String): String? = map[k]
         override fun put(k: String, v: String) {
             map[k] = v

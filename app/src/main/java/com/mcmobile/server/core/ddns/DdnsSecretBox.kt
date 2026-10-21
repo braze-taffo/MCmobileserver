@@ -12,6 +12,8 @@ import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.SecretKeySpec
 
 interface Kv {
+    /** A detached, atomic view of all values, including configuration and encrypted credentials. */
+    fun snapshot(): Map<String, String>
     fun get(k: String): String?
     fun put(k: String, v: String)
     fun putAll(entries: Map<String, String>) {

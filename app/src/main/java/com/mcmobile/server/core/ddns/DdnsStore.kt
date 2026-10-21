@@ -22,10 +22,13 @@ data class DdnsLoaded(
 
 class DdnsStore(private val kv: Kv, private val box: DdnsSecretBox) {
     fun load(): DdnsLoaded {
+        // A concurrent save must not pair one provider's configuration with another's token.
+        val values = kv.snapshot()
         val stored = runCatching {
-            kv.get(KEY_CONFIG)?.let { json.decodeFromString<DdnsConfig>(it) }
+            values[KEY_CONFIG]?.let { json.decodeFromString<DdnsConfig>(it) }
         }.getOrNull() ?: DdnsConfig()
-        val read = readSecrets()
+        val read = readSecrets(values[KEY_SECRETS])
+        var lastFingerprint = values[KEY_LAST_FINGERPRINT]?.ifEmpty { null }
         val webhook = when {
             !read.lost && read.webhookUrl.isNotEmpty() -> read.webhookUrl
             else -> stored.webhookUrl
@@ -33,21 +36,23 @@ class DdnsStore(private val kv: Kv, private val box: DdnsSecretBox) {
         val token = if (read.lost) "" else read.token
         if (!read.lost && stored.webhookUrl.isNotEmpty()) {
             val merged = stored.copy(token = token, webhookUrl = webhook)
-            val oldFingerprint = kv.get(KEY_LAST_FINGERPRINT)
+            val oldFingerprint = lastFingerprint
             val replacement = if (!oldFingerprint.isNullOrEmpty() && oldFingerprint.contains(stored.webhookUrl)) {
                 merged.fingerprint()
             } else {
                 null
             }
-            runCatching { write(merged, replacement) }
+            runCatching { write(merged, replacement) }.onSuccess {
+                if (replacement != null) lastFingerprint = replacement
+            }
         }
         return DdnsLoaded(
             config = stored.copy(token = token, webhookUrl = webhook),
             secretsLost = read.lost,
-            lastIpv4 = kv.get(KEY_LAST_IPV4)?.ifEmpty { null },
-            lastIpv6 = kv.get(KEY_LAST_IPV6)?.ifEmpty { null },
-            lastFingerprint = kv.get(KEY_LAST_FINGERPRINT)?.ifEmpty { null },
-            lastSuccessAt = kv.get(KEY_LAST_SUCCESS_AT)?.toLongOrNull(),
+            lastIpv4 = values[KEY_LAST_IPV4]?.ifEmpty { null },
+            lastIpv6 = values[KEY_LAST_IPV6]?.ifEmpty { null },
+            lastFingerprint = lastFingerprint,
+            lastSuccessAt = values[KEY_LAST_SUCCESS_AT]?.toLongOrNull(),
         )
     }
 
@@ -82,8 +87,7 @@ class DdnsStore(private val kv: Kv, private val box: DdnsSecretBox) {
         return Base64.getEncoder().encodeToString(box.encrypt(payload.toByteArray(Charsets.UTF_8)))
     }
 
-    private fun readSecrets(): SecretRead {
-        val encoded = kv.get(KEY_SECRETS)
+    private fun readSecrets(encoded: String?): SecretRead {
         if (encoded.isNullOrEmpty()) return SecretRead(token = "", webhookUrl = "", lost = false)
         val plain = try {
             String(box.decrypt(Base64.getDecoder().decode(encoded)), Charsets.UTF_8)
@@ -130,6 +134,10 @@ private data class DdnsSecretPayload(
 )
 
 private class PrefsKv(private val prefs: SharedPreferences) : Kv {
+    override fun snapshot(): Map<String, String> = prefs.all.mapNotNull { (key, value) ->
+        (value as? String)?.let { key to it }
+    }.toMap()
+
     override fun get(k: String): String? = prefs.getString(k, null)
 
     override fun put(k: String, v: String) = putAll(mapOf(k to v))

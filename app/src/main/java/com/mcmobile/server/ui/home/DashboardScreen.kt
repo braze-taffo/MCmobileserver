@@ -87,12 +87,13 @@ fun DashboardScreen(vm: AppViewModel, updates: UpdateViewModel, nav: NavControll
                 Text("开服工具", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                     FeatureTile("内网穿透", "让朋友从外网加入", Icons.Default.Public, Modifier.weight(1f)) { nav.navigate(Routes.FRP) }
-                    FeatureTile("运行控制台", if (running) "查看日志与发送指令" else "尚未连接 · 查看控制台", Icons.Default.Terminal, Modifier.weight(1f)) { nav.navigate(Routes.CONSOLE) }
+                    FeatureTile("动态域名", "开服期间同步公网地址", Icons.Default.Language, Modifier.weight(1f)) { nav.navigate(Routes.DDNS) }
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    FeatureTile("运行控制台", if (running) "查看日志与发送指令" else "尚未连接 · 查看控制台", Icons.Default.Terminal, Modifier.weight(1f)) { nav.navigate(Routes.CONSOLE) }
                     FeatureTile("应用设置", "运行环境与更新偏好", Icons.Default.Settings, Modifier.weight(1f)) { nav.navigate(Routes.SETTINGS) }
-                    FeatureTile("开源项目", "查看源码与发行版本", Icons.Default.Code, Modifier.weight(1f)) { AppLinks.open(context, UpdateChecker.REPOSITORY) }
                 }
+                FeatureTile("开源项目", "查看源码与发行版本", Icons.Default.Code, Modifier.fillMaxWidth()) { AppLinks.open(context, UpdateChecker.REPOSITORY) }
 
                 update.release?.let { release ->
                     Card(onClick = updates::showRelease, colors = CardDefaults.cardColors(containerColor = colors.tertiaryContainer)) {

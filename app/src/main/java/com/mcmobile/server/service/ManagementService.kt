@@ -7,6 +7,7 @@ import android.os.*
 import com.mcmobile.server.R
 import com.mcmobile.server.core.ServerController
 import com.mcmobile.server.core.console.ConsoleSession
+import com.mcmobile.server.core.ddns.DdnsRuntime
 import com.mcmobile.server.core.manage.*
 import com.mcmobile.server.data.*
 import kotlinx.coroutines.*
@@ -27,13 +28,17 @@ class ManagementService : Service() {
         super.onCreate()
         getSystemService(NotificationManager::class.java).createNotificationChannel(NotificationChannel("mcs_manage", "服务器管理任务", NotificationManager.IMPORTANCE_LOW))
         val notification = Notification.Builder(this, "mcs_manage").setSmallIcon(R.drawable.ic_launcher_foreground)
-            .setContentTitle("服务器管理正在运行").setContentText("运行期间执行已启用的备份、重启和命令任务").setOngoing(true).build()
+            .setContentTitle("服务器管理正在运行").setContentText("运行期间执行已启用的备份、重启、命令和动态域名").setOngoing(true).build()
         if (Build.VERSION.SDK_INT >= 34) startForeground(1003, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
         else startForeground(1003, notification)
         wakeLock = getSystemService(PowerManager::class.java).newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "mcs:management").apply { acquire() }
     }
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (!started) { started = true; scope.launch { runLoop() } }
+        if (!started) {
+            started = true
+            scope.launch { runLoop() }
+            DdnsRuntime.run(applicationContext, scope)
+        }
         return START_NOT_STICKY
     }
     private fun log(root: File?, message: String) {

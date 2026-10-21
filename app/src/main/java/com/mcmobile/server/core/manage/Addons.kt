@@ -14,7 +14,7 @@ import java.util.concurrent.TimeUnit
 import java.util.jar.JarFile
 
 object Addons {
-    data class Local(val file: File, val id: String?, val name: String, val version: String?, val enabled: Boolean)
+    data class Local(val file: File, val id: String?, val name: String, val version: String?, val enabled: Boolean, val description: String? = null)
     data class Hit(val id: String, val title: String, val description: String, val downloads: Long)
     data class SearchPage(val hits: List<Hit>, val total: Int, val offset: Int) {
         val hasNext: Boolean get() = offset + hits.size < total
@@ -37,7 +37,7 @@ object Addons {
         val dir = ManagedFiles(root).child(root, directory(type))
         return dir.listFiles().orEmpty().filter { it.isFile && (it.name.endsWith(".jar", true) || it.name.endsWith(".jar.disabled", true)) }.map { file ->
             ManagedFiles(root).checked(file)
-            var id: String? = null; var name = file.name.removeSuffix(".disabled").removeSuffix(".jar"); var version: String? = null
+            var id: String? = null; var name = file.name.removeSuffix(".disabled").removeSuffix(".jar"); var version: String? = null; var description: String? = null
             runCatching { JarFile(file).use { jar ->
                 fun read(path: String): String? = jar.getJarEntry(path)?.takeIf { it.size <= 1048576 }?.let { entry ->
                     jar.getInputStream(entry).use { input ->
@@ -49,26 +49,38 @@ object Addons {
                             if (output.size() + count > 1048576) return@use null
                             output.write(buffer, 0, count)
                         }
-                        output.toString("UTF-8")
+                        ModMetadataText.decode(output.toByteArray())
                     }
                 }
-                val fabric = read("fabric.mod.json")?.let { json.parseToJsonElement(it).jsonObject }
+                fun JsonObject.string(key: String): String? = (this[key] as? JsonPrimitive)?.contentOrNull?.takeIf { it.isNotBlank() }
+                fun readObject(path: String): JsonObject? = runCatching {
+                    read(path)?.let { json.parseToJsonElement(it) as? JsonObject }
+                }.getOrNull()
+                val fabric = readObject("fabric.mod.json")
+                val quiltLoader = if (fabric == null) (readObject("quilt.mod.json")?.get("quilt_loader") as? JsonObject)
+                    ?.takeIf { it.string("id") != null } else null
                 if (fabric != null) {
-                    id = fabric["id"]?.jsonPrimitive?.content; name = fabric["name"]?.jsonPrimitive?.content ?: name
-                    version = fabric["version"]?.jsonPrimitive?.content
+                    id = fabric.string("id"); name = fabric.string("name") ?: name
+                    version = fabric.string("version"); description = fabric.string("description")
+                } else if (quiltLoader != null) {
+                    val meta = quiltLoader["metadata"] as? JsonObject
+                    id = quiltLoader.string("id"); name = meta?.string("name") ?: name
+                    version = quiltLoader.string("version"); description = meta?.string("description")
                 } else {
                     val toml = read("META-INF/neoforge.mods.toml") ?: read("META-INF/mods.toml")
                     val yaml = read("paper-plugin.yml") ?: read("plugin.yml")
-                    fun field(text: String?, key: String, separator: String): String? = text?.let {
-                        Regex("(?m)^\\s*$key\\s*$separator\\s*[\"']?([^\"'\\r\\n]+)").find(it)?.groupValues?.get(1)?.trim()
+                    fun field(text: String?, key: String, separator: String, topLevel: Boolean = false): String? = text?.let {
+                        val indent = if (topLevel) "" else "[ \\t]*"
+                        Regex("(?m)^$indent$key[ \\t]*$separator[ \\t]*[\"']?([^\"'\\r\\n]+)").find(it)?.groupValues?.get(1)?.trim()
                     }
                     id = field(toml, "modId", "=") ?: field(yaml, "name", ":")
                     name = field(toml, "displayName", "=") ?: field(yaml, "name", ":") ?: name
                     version = field(toml, "version", "=")?.takeUnless { it.contains('$') } ?: field(yaml, "version", ":")
+                    description = AddonMetadataFields.tomlString(toml, "description") ?: field(yaml, "description", ":", topLevel = true)
                 }
                 version = version ?: jar.manifest?.mainAttributes?.getValue("Implementation-Version")
             } }
-            Local(file, id, name, version, !file.name.endsWith(".disabled", true))
+            Local(file, id, name, version, !file.name.endsWith(".disabled", true), description)
         }.sortedBy { it.name.lowercase() }
     }
     private fun get(path: String, query: Map<String, String> = emptyMap(), allowMissing: Boolean = false): JsonElement? {

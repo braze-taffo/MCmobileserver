@@ -16,12 +16,14 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PlayArrow
@@ -47,9 +49,12 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
@@ -71,7 +76,15 @@ fun HomeScreen(vm: AppViewModel, nav: NavController) {
     val deletingId by vm.deletingId.collectAsState()
     val loadError by vm.loadError.collectAsState()
     var pendingDelete by remember { mutableStateOf<ServerInstance?>(null) }
+    var editingCoverId by rememberSaveable { mutableStateOf<String?>(null) }
+    var coverRevision by rememberSaveable { mutableIntStateOf(0) }
 
+    instances.find { it.id == editingCoverId }?.let { instance ->
+        CoverPicker(vm.instanceDirOf(instance), onClose = { editingCoverId = null }, onChanged = {
+            coverRevision++
+            editingCoverId = null
+        })
+    }
 
     // 删除不可撤销（地图、配置、日志一起没），必须二次确认
     pendingDelete?.let { inst ->
@@ -229,6 +242,8 @@ fun HomeScreen(vm: AppViewModel, nav: NavController) {
                             onProperties = { nav.navigate(Routes.properties(inst.id)) },
                             onFiles = { nav.navigate(Routes.files(inst.id)) },
                             onInstanceSettings = { nav.navigate(Routes.instance(inst.id)) },
+                            onEditCover = { editingCoverId = inst.id },
+                            coverRevision = coverRevision,
                             onDelete = { pendingDelete = inst },
                         )
                     }
@@ -276,11 +291,16 @@ private fun InstanceCard(
     onProperties: () -> Unit,
     onFiles: () -> Unit,
     onInstanceSettings: () -> Unit,
+    onEditCover: () -> Unit,
+    coverRevision: Int,
     onDelete: () -> Unit,
 ) {
     Card(modifier = Modifier.fillMaxWidth().clickable(onClick = onManage)) {
         Column(Modifier.padding(16.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
+                InstanceCover(java.io.File(dirPath), instance,
+                    Modifier.size(44.dp).clip(RoundedCornerShape(10.dp)), revision = coverRevision)
+                Spacer(Modifier.width(12.dp))
                 Column(Modifier.weight(1f)) {
                     Text(instance.name, style = MaterialTheme.typography.titleMedium)
                     Spacer(Modifier.height(2.dp))
@@ -336,6 +356,9 @@ private fun InstanceCard(
                 }
                 TextButton(onClick = onManage) { Text("管理面板") }
                 Spacer(Modifier.weight(1f))
+                IconButton(onClick = onEditCover, enabled = !deleting) {
+                    Icon(Icons.Default.Image, "换封面")
+                }
                 IconButton(onClick = onDelete) {
                     Icon(Icons.Default.Delete, "删除",
                         tint = MaterialTheme.colorScheme.onSurfaceVariant)

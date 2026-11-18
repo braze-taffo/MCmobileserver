@@ -116,8 +116,19 @@ class InstanceRepository(private val context: Context) {
 
     suspend fun update(instance: ServerInstance) = mutex.withLock {
         withContext(Dispatchers.IO) {
-            require(_instances.value.any { it.id == instance.id }) { "实例已被移除" }
-            val next = _instances.value.map { if (it.id == instance.id) instance else it }
+            val current = requireNotNull(byId(instance.id)) { "实例已被移除" }
+            val updated = instance.copy(lastStartedMs = current.lastStartedMs)
+            val next = _instances.value.map { if (it.id == updated.id) updated else it }
+            InstanceManifest.writeAtomically(manifestFile(), InstanceManifest.encode(next))
+            _instances.value = next
+        }
+    }
+
+    suspend fun recordServerStart(id: String, startedAtMs: Long) = mutex.withLock {
+        val current = byId(id) ?: return@withLock
+        if (current.lastStartedMs == startedAtMs || (current.needsInstaller && !current.installed)) return@withLock
+        withContext(Dispatchers.IO) {
+            val next = _instances.value.map { if (it.id == id) it.copy(lastStartedMs = startedAtMs) else it }
             InstanceManifest.writeAtomically(manifestFile(), InstanceManifest.encode(next))
             _instances.value = next
         }

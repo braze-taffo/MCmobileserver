@@ -107,6 +107,15 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                         (_activeInstanceId.value ?: st.instanceId)?.let { id ->
                             viewModelScope.launch { refreshLanAddress(id) }
                         }
+                        val instanceId = st.instanceId
+                        val startedAt = st.startedAtMs
+                        if (instanceId != null && startedAt != null) {
+                            try {
+                                repo.recordServerStart(instanceId, startedAt)
+                            } catch (e: java.io.IOException) {
+                                android.util.Log.w("mcs", "Unable to persist server start time", e)
+                            }
+                        }
                     }
                 }
             }

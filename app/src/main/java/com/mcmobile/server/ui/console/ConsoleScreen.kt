@@ -1,213 +1,209 @@
 package com.mcmobile.server.ui.console
 
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.imePadding
-import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Send
-import androidx.compose.material.icons.filled.ContentCopy
-import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.Stop
-import androidx.compose.material.icons.filled.Warning
-import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Surface
-import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBar
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
+import androidx.compose.material.icons.filled.*
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalClipboardManager
-import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.navigation.NavController
 import com.mcmobile.server.core.console.ConsoleSession
+import com.mcmobile.server.core.console.StartConflict
+import com.mcmobile.server.ui.AppLinks
 import com.mcmobile.server.ui.AppViewModel
-import com.mcmobile.server.ui.theme.ConsoleBg
-import com.mcmobile.server.ui.theme.ConsoleRed
+import com.mcmobile.server.ui.theme.LogWarning
+import com.mcmobile.server.ui.theme.MCServerTheme
+import com.mcmobile.server.ui.theme.RunningIndicator
 import com.mcmobile.server.ui.theme.ConsoleTextStyle
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ConsoleScreen(vm: AppViewModel, nav: NavController) {
     val lines by vm.consoleLines.collectAsState()
     val state by vm.consoleState.collectAsState()
     val lanAddress by vm.lanAddress.collectAsState()
-    var input by remember { mutableStateOf("") }
-    val listState = rememberLazyListState()
-    val clipboard = LocalClipboardManager.current
-
-    val running = state.serverStatus in setOf("RUNNING", "STARTING", "STOPPING")
-
-    LaunchedEffect(lines.size) {
-        if (lines.isNotEmpty()) listState.animateScrollToItem(lines.size - 1)
+    val context = LocalContext.current
+    val running = state.status == "CONNECTED" && StartConflict.isActive(state.serverStatus)
+    val status = when {
+        state.status == "EXITED" -> "已退出" + (state.exitCode?.let { " · $it" } ?: "")
+        state.status != "CONNECTED" -> "未连接"
+        else -> when (state.serverStatus) {
+            "RUNNING" -> "运行中"
+            "STARTING" -> "启动中"
+            "STOPPING" -> "停止中"
+            "STOPPED" -> "已停止"
+            "CRASHED", "FAILED" -> "运行失败"
+            else -> "已连接"
+        }
+    }
+    var menu by remember { mutableStateOf(false) }
+    var follow by rememberSaveable { mutableStateOf(true) }
+    var input by rememberSaveable(state.instanceId) { mutableStateOf("") }
+    var sendError by remember(state.instanceId) { mutableStateOf(false) }
+    val list = rememberLazyListState()
+    LaunchedEffect(lines, follow) {
+        if (follow && lines.isNotEmpty()) list.scrollToItem(lines.lastIndex)
     }
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = {
-                    Column {
-                        Text("控制台", fontWeight = FontWeight.Bold)
-                        Text(
-                            text = when (state.status) {
-                                "CONNECTED" -> state.serverStatus ?: "已连接"
-                                "EXITED" -> "已退出${state.exitCode?.let { "（code=$it）" } ?: ""}"
-                                else -> "未连接"
-                            }.let { if (state.name.isBlank()) it else "${state.name} · $it" },
-                            style = MaterialTheme.typography.labelSmall,
-                        )
-                    }
-                },
-                navigationIcon = {
-                    IconButton(onClick = { nav.popBackStack() }) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, "返回")
-                    }
-                },
-                actions = {
-                    IconButton(onClick = {
-                        clipboard.setText(AnnotatedString(lines.takeLast(500).joinToString("\n")))
-                    }) { Icon(Icons.Default.ContentCopy, "复制日志") }
-                    IconButton(onClick = { vm.clearConsole() }) {
-                        Icon(Icons.Default.Delete, "清屏")
-                    }
-                    IconButton(onClick = { vm.stopServer(force = false) }, enabled = running) {
-                        Icon(Icons.Default.Stop, "停止", tint = MaterialTheme.colorScheme.error)
-                    }
-                    IconButton(onClick = { vm.stopServer(force = true) }, enabled = running) {
-                        Icon(Icons.Default.Warning, "强制结束", tint = ConsoleRed)
-                    }
-                },
-            )
-        },
-        bottomBar = {
-            Surface(tonalElevation = 3.dp) {
-                Row(
-                    Modifier
-                        .fillMaxWidth()
-                        .imePadding()
-                        .padding(horizontal = 8.dp, vertical = 6.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    OutlinedTextField(
-                        value = input,
-                        onValueChange = { input = it },
-                        modifier = Modifier.weight(1f),
-                        placeholder = { Text("输入服务器命令，如 list / say hi / stop") },
-                        singleLine = true,
-                        enabled = running,
-                    )
-                    IconButton(
-                        onClick = {
-                            val cmd = input.trim()
-                            if (cmd.isNotEmpty()) {
-                                ConsoleSession.sendCommand(cmd)
-                                input = ""
-                            }
-                        },
-                        enabled = running && input.isNotBlank(),
-                    ) { Icon(Icons.AutoMirrored.Filled.Send, "发送") }
-                }
-            }
-        },
-    ) { padding ->
-        Column(
-            Modifier
-                .fillMaxSize()
-                .padding(padding)
-                .imePadding(),
-        ) {
-            if (!running && state.status == "EXITED") {
-                Surface(color = MaterialTheme.colorScheme.errorContainer, modifier = Modifier.fillMaxWidth()) {
-                    Row(
-                        Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Text(
-                            state.error ?: "服务器进程已结束",
-                            Modifier.weight(1f),
-                            color = MaterialTheme.colorScheme.onErrorContainer,
-                        )
-                        TextButton(onClick = { nav.popBackStack() }) { Text("返回") }
-                    }
-                }
-            } else if (state.error != null) {
-                // 服务端运行期拒绝（如"已有服务器在运行"）必须让用户看到，
-                // 否则他只会看到一段不认识的旧日志
-                Surface(color = MaterialTheme.colorScheme.errorContainer, modifier = Modifier.fillMaxWidth()) {
-                    Text(
-                        state.error!!,
-                        Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
-                        color = MaterialTheme.colorScheme.onErrorContainer,
-                    )
-                }
-            }
-            // 同一 Wi-Fi 下电脑端 MC 客户端填这个地址即可进入（服务器没跑时不显示）
-            lanAddress?.let { address ->
-                Surface(color = MaterialTheme.colorScheme.surfaceVariant, modifier = Modifier.fillMaxWidth()) {
-                    Row(
-                        Modifier.padding(start = 16.dp, end = 4.dp, top = 6.dp, bottom = 6.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Column(Modifier.weight(1f)) {
-                            Text(
-                                "局域网地址（电脑端 MC 客户端填这个）",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                            Text(
-                                address,
-                                style = MaterialTheme.typography.bodyMedium,
-                                fontWeight = FontWeight.Bold,
-                            )
+    fun send() {
+        val cmd = input.trim()
+        if (!running || cmd.isEmpty()) return
+        sendError = !ConsoleSession.sendCommand(cmd)
+        if (!sendError) input = ""
+    }
+
+    MCServerTheme(darkTheme = true) {
+        val colors = MaterialTheme.colorScheme
+        Scaffold(containerColor = colors.background, contentColor = colors.onBackground) { insets ->
+            BoxWithConstraints(Modifier.fillMaxSize().padding(insets).consumeWindowInsets(insets).imePadding(),
+                contentAlignment = Alignment.TopCenter) {
+                val compact = maxWidth >= 520.dp && maxHeight < 420.dp
+                Column(Modifier.widthIn(max = 840.dp).fillMaxSize().padding(horizontal = 14.dp)) {
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        IconButton(onClick = { nav.popBackStack() }) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "返回") }
+                        Column(if (compact) Modifier else Modifier.weight(1f)) {
+                            Text("运行控制台",
+                                style = if (compact) MaterialTheme.typography.titleMedium else MaterialTheme.typography.titleLarge,
+                                fontWeight = FontWeight.Bold)
+                            if (!compact && state.name.isNotBlank()) Text(state.name, color = colors.onSurfaceVariant,
+                                style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
                         }
-                        IconButton(onClick = {
-                            clipboard.setText(AnnotatedString(address))
-                        }) { Icon(Icons.Default.ContentCopy, "复制地址") }
+                        if (compact) {
+                            Text(state.name, Modifier.weight(1f).padding(horizontal = 12.dp),
+                                style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant,
+                                maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
+                        Box(Modifier.size(7.dp).background(if (running) RunningIndicator else colors.onSurfaceVariant, CircleShape))
+                        Spacer(Modifier.width(6.dp))
+                        Text(status, style = MaterialTheme.typography.labelMedium)
+                        if (compact) {
+                            FollowLogsButton(follow) { follow = !follow }
+                        }
+                        Box {
+                            IconButton(onClick = { menu = true }) { Icon(Icons.Default.MoreVert, "控制台操作") }
+                            DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                                val address = lanAddress
+                                if (compact && address != null) {
+                                    DropdownMenuItem(
+                                        text = { Text("复制局域网地址\n$address") },
+                                        onClick = {
+                                            menu = false
+                                            AppLinks.copy(context, address)
+                                        },
+                                    )
+                                }
+                                DropdownMenuItem(text = { Text("复制最近日志") }, enabled = lines.isNotEmpty(), onClick = {
+                                    menu = false
+                                    AppLinks.copy(context, lines.takeLast(500).joinToString("\n"))
+                                })
+                                DropdownMenuItem(text = { Text("清屏") }, enabled = lines.isNotEmpty(), onClick = {
+                                    menu = false
+                                    vm.clearConsole()
+                                })
+                                HorizontalDivider()
+                                DropdownMenuItem(text = { Text("停止服务器") }, enabled = running, onClick = {
+                                    menu = false
+                                    vm.stopServer(force = false)
+                                })
+                                DropdownMenuItem(text = { Text("强制结束") }, enabled = running,
+                                    colors = MenuDefaults.itemColors(textColor = colors.error), onClick = {
+                                    menu = false
+                                    vm.stopServer(force = true)
+                                })
+                            }
+                        }
                     }
-                }
-            }
-            LazyColumn(
-                state = listState,
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(horizontal = 8.dp, vertical = 4.dp),
-                verticalArrangement = Arrangement.spacedBy(1.dp),
-            ) {
-                items(lines) { line ->
-                    Text(
-                        text = line,
-                        style = ConsoleTextStyle,
-                        color = when {
-                            line.contains("ERROR", true) || line.contains("FATAL", true) -> ConsoleRed
-                            line.contains("WARN", true) -> Color(0xFFD29922)
-                            line.startsWith("[MC服务器]") -> Color(0xFF58A6FF)
-                            else -> Color(0xFFC9D1D9)
-                        },
-                    )
+                    val failed = state.error != null || state.serverStatus in setOf("CRASHED", "FAILED") ||
+                        (state.exitCode ?: 0) != 0
+                    val notice = state.error ?: when {
+                        failed -> "服务器进程异常结束"
+                        state.status == "EXITED" -> "服务器进程已结束"
+                        else -> null
+                    }
+                    if (notice != null) Text(notice, Modifier.padding(vertical = 6.dp),
+                        color = if (failed) colors.error else colors.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
+                    if (!compact) lanAddress?.let { address ->
+                        Surface(color = colors.surfaceContainer, shape = RoundedCornerShape(12.dp)) {
+                            Row(Modifier.fillMaxWidth().padding(start = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                                Icon(Icons.Default.Lan, null, tint = colors.primary)
+                                Column(Modifier.weight(1f).padding(horizontal = 10.dp)) {
+                                    Text("局域网地址", style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
+                                    Text(address, style = ConsoleTextStyle)
+                                }
+                                IconButton(onClick = { AppLinks.copy(context, address) }) { Icon(Icons.Default.ContentCopy, "复制地址") }
+                            }
+                        }
+                    }
+                    Spacer(Modifier.height(if (compact) 4.dp else 8.dp))
+                    Surface(modifier = Modifier.fillMaxWidth().weight(1f), shape = RoundedCornerShape(16.dp),
+                        color = colors.surfaceContainerLowest, border = androidx.compose.foundation.BorderStroke(1.dp, colors.outlineVariant)) {
+                        Column {
+                            if (!compact) {
+                                Row(Modifier.fillMaxWidth().background(colors.surface).padding(start = 14.dp, end = 5.dp),
+                                    verticalAlignment = Alignment.CenterVertically) {
+                                    Icon(Icons.Default.Terminal, null, Modifier.size(19.dp), tint = colors.primary)
+                                    Spacer(Modifier.width(8.dp))
+                                    Text("实时日志", Modifier.weight(1f), fontWeight = FontWeight.SemiBold)
+                                    FollowLogsButton(follow) { follow = !follow }
+                                }
+                            }
+                            if (lines.isEmpty()) {
+                                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                    Text(if (running) "等待日志输出…" else "暂无日志",
+                                        style = ConsoleTextStyle, color = colors.onSurfaceVariant)
+                                }
+                            } else LazyColumn(Modifier.fillMaxSize(), state = list,
+                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = if (compact) 6.dp else 12.dp),
+                                verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                                items(lines.size) { index ->
+                                    val line = lines[index]
+                                    Text(line, style = ConsoleTextStyle, color = when {
+                                        line.contains("ERROR", true) || line.contains("FATAL", true) -> colors.error
+                                        line.contains("WARN", true) -> LogWarning
+                                        line.startsWith("[MC服务器]") -> colors.primary
+                                        else -> colors.onSurface
+                                    })
+                                }
+                            }
+                        }
+                    }
+                    if (sendError) Text("命令发送失败，请检查连接后重试", color = colors.error, style = MaterialTheme.typography.bodySmall)
+                    Row(Modifier.fillMaxWidth().padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedTextField(value = input, onValueChange = {
+                            input = it.filterNot { c -> c == '\r' || c == '\n' || c == '\u0000' }
+                            sendError = false
+                        }, modifier = Modifier.weight(1f), enabled = running, singleLine = true,
+                            shape = RoundedCornerShape(12.dp), textStyle = ConsoleTextStyle,
+                            placeholder = { Text(if (running) "输入服务器命令" else "连接后可输入命令") },
+                            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+                            keyboardActions = KeyboardActions(onSend = { send() }))
+                        FilledIconButton(onClick = ::send, enabled = running && input.isNotBlank(), modifier = Modifier.size(48.dp)) {
+                            Icon(Icons.AutoMirrored.Filled.Send, "发送命令")
+                        }
+                    }
                 }
             }
         }
     }
+}
+
+@Composable
+private fun FollowLogsButton(follow: Boolean, onClick: () -> Unit) {
+    TextButton(onClick = onClick) { Text(if (follow) "暂停跟随" else "跟随最新") }
 }

@@ -9,6 +9,10 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
+import androidx.navigation.compose.currentBackStackEntryAsState
+import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.ui.platform.LocalView
+import androidx.core.view.WindowCompat
 import com.mcmobile.server.ui.console.ConsoleScreen
 import com.mcmobile.server.ui.create.CreateScreen
 import com.mcmobile.server.ui.home.HomeScreen
@@ -49,6 +53,16 @@ object Routes {
 fun MCServerApp(vm: AppViewModel = viewModel(), updates: UpdateViewModel = viewModel()) {
     val nav = rememberNavController()
     val context = LocalContext.current
+    val view = LocalView.current
+    val entry by nav.currentBackStackEntryAsState()
+    val darkIcons = entry?.destination?.route != Routes.CONSOLE && !isSystemInDarkTheme()
+    LaunchedEffect(view, darkIcons) {
+        val activity = context as? android.app.Activity ?: return@LaunchedEffect
+        WindowCompat.getInsetsController(activity.window, view).apply {
+            isAppearanceLightStatusBars = darkIcons
+            isAppearanceLightNavigationBars = darkIcons
+        }
+    }
     val instances by vm.instances.collectAsState()
     var eula by remember { mutableStateOf<com.mcmobile.server.data.ServerInstance?>(null) }
 

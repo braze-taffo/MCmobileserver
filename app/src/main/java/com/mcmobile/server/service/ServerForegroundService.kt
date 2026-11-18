@@ -85,6 +85,7 @@ class ServerForegroundService : Service() {
         val memoryKb: Long? = null,
         val cpuPercent: Double? = null,
         val uptimeMs: Long? = null,
+        val startedAtMs: Long? = null,
     )
 
     enum class RunStatus { IDLE, STARTING, RUNNING, STOPPING, STOPPED, CRASHED, FAILED }
@@ -104,6 +105,7 @@ class ServerForegroundService : Service() {
     private var logPump: Job? = null
     private var spec: LaunchSpec? = null
     private var startedAt = android.os.SystemClock.elapsedRealtime()
+    private var startedAtMs: Long? = null
     private var lastCpu = android.os.Process.getElapsedCpuTime()
     private var lastSample = startedAt
     private var sampleCpu: Double? = null
@@ -208,6 +210,7 @@ class ServerForegroundService : Service() {
             bridge = b
             b.start()
             startedAt = android.os.SystemClock.elapsedRealtime()
+            startedAtMs = System.currentTimeMillis()
             scope.launch {
                 while (true) {
                     delay(5000)
@@ -365,6 +368,7 @@ class ServerForegroundService : Service() {
                     error = error,
                     pid = android.os.Process.myPid(), memoryKb = android.os.Debug.getPss(),
                     cpuPercent = sampleCpu, uptimeMs = android.os.SystemClock.elapsedRealtime() - startedAt,
+                    startedAtMs = startedAtMs,
                 ),
             ),
         )

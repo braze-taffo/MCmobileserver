@@ -41,6 +41,7 @@ object ConsoleSession {
         val memoryKb: Long? = null,
         val cpuPercent: Double? = null,
         val uptimeMs: Long? = null,
+        val startedAtMs: Long? = null,
     )
 
     /** :server 进程当前正在跑的实例 */
@@ -61,7 +62,9 @@ object ConsoleSession {
     private val connectMutex = Mutex()
 
     /** 尝试连接（:server 进程可能还在启动），最多等 ~8s */
-    suspend fun connect(attempts: Int = 25) = withContext(Dispatchers.IO) {
+    suspend fun connect(attempts: Int = 25) = connect(attempts, reportFailure = true)
+
+    private suspend fun connect(attempts: Int, reportFailure: Boolean) = withContext(Dispatchers.IO) {
         if (isConnected()) return@withContext
         connectMutex.withLock {
             if (isConnected()) return@withLock
@@ -88,7 +91,9 @@ object ConsoleSession {
                     delay(300)
                 }
             }
-            _state.value = UiState(status = "DISCONNECTED", error = "无法连接服务器进程: ${lastError?.message}")
+            if (reportFailure) {
+                _state.value = UiState(status = "DISCONNECTED", error = "无法连接服务器进程: ${lastError?.message}")
+            }
         }
     }
 
@@ -107,7 +112,8 @@ object ConsoleSession {
      * 连不上进程（= 没有服务器在跑）返回 null。
      */
     suspend fun activeServer(attempts: Int = 8, timeoutMs: Long = 1500): Active? {
-        if (!isConnected()) connect(attempts)
+        // A routine inventory probe after shutdown must preserve the exit code and console history.
+        if (!isConnected()) connect(attempts, reportFailure = false)
         if (!isConnected()) return null
         // 状态优先发送，历史回放用 H 帧，不参与新命令的确认。
         val st = withTimeoutOrNull(timeoutMs) {
@@ -138,6 +144,7 @@ object ConsoleSession {
                                 exitCode = msg.exitCode,
                                 error = msg.error,
                                 pid = msg.pid, memoryKb = msg.memoryKb, cpuPercent = msg.cpuPercent, uptimeMs = msg.uptimeMs,
+                                startedAtMs = msg.startedAtMs,
                             )
                         }
                     }
@@ -212,5 +219,6 @@ object ConsoleSession {
         val memoryKb: Long? = null,
         val cpuPercent: Double? = null,
         val uptimeMs: Long? = null,
+        val startedAtMs: Long? = null,
     )
 }

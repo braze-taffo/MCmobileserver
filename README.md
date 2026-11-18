@@ -1,6 +1,6 @@
 # MC Mobile Server
 
-当前正式版本：[v1.0.7](https://github.com/braze-taffo/MCmobileserver/releases/tag/v1.0.7)。修复本地模组与插件列表的中文名称和描述显示，完善 Forge/NeoForge 多行描述及元数据回退。更新内容见 [发行说明](docs/releases/v1.0.7.md)。
+当前正式版本为 v1.0.8。首页支持自定义服务器封面，控制台优化了小屏横向布局。[下载正式版](https://github.com/braze-taffo/MCmobileserver/releases/tag/v1.0.8) · [发行说明](docs/releases/v1.0.8.md)
 
 ## 开源协议
 
